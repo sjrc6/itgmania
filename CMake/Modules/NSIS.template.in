@@ -182,7 +182,7 @@ Function AddToPath
   Push $2
   Push $3
 
-  # don't add if the path doesn't exist
+  ; don't add if the path doesn't exist
   IfFileExists "$0\*.*" "" AddToPath_done
 
   SetRegView 64
@@ -286,17 +286,17 @@ Function un.RemoveFromPath
     Pop $2 ; pos of our dir
     StrCmp $2 "" unRemoveFromPath_done
       ; else, it is in path
-      # $0 - path to add
-      # $1 - path var
+      ; $0 - path to add
+      ; $1 - path var
       StrLen $3 "$0;"
       StrLen $4 $2
-      StrCpy $5 $1 -$4 # $5 is now the part before the path to remove
-      StrCpy $6 $2 "" $3 # $6 is now the part after the path to remove
+      StrCpy $5 $1 -$4 ; $5 is now the part before the path to remove
+      StrCpy $6 $2 "" $3 ; $6 is now the part after the path to remove
       StrCpy $3 $5$6
 
-      StrCpy $5 $3 1 -1 # copy last char
-      StrCmp $5 ";" 0 +2 # if last char == ;
-        StrCpy $3 $3 -1 # remove last char
+      StrCpy $5 $3 1 -1 ; copy last char
+      StrCmp $5 ";" 0 +2 ; if last char == ;
+        StrCpy $3 $3 -1 ; remove last char
 
       StrCmp $ADD_TO_PATH_ALL_USERS "1" unWriteAllKey
         WriteRegExpandStr ${NT_current_env} "PATH" $3
