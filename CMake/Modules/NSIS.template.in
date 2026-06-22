@@ -304,7 +304,7 @@ Function un.RemoveFromPath
       unWriteAllKey:
         WriteRegExpandStr ${NT_all_env} "PATH" $3
       unDoSend:
-      SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
+        SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
   unRemoveFromPath_done:
     Pop $6
