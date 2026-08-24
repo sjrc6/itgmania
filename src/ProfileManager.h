@@ -177,6 +177,8 @@ class ProfileManager {
   mutable bool m_bNeedToBackUpLastLoad[NUM_PLAYERS];  // if true, back up
                                                       // profile on next save
   bool m_bNewProfile[NUM_PLAYERS];
+  // prevent a bad save from overwriting Stats.xml after a prefix reload failed
+  bool m_bStatsPrefixChangeFailed[NUM_PLAYERS];
 
   Profile* m_pMemoryCardProfile[NUM_PLAYERS];  // holds Profile for the
                                                // currently inserted card

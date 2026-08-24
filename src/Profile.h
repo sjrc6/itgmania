@@ -439,7 +439,7 @@ class Profile {
   void swap(Profile& other);
 
   // Loading and saving
-  void HandleStatsPrefixChange(std::string dir, bool require_signature);
+  bool HandleStatsPrefixChange(std::string dir, bool require_signature);
   ProfileLoadResult LoadAllFromDir(std::string sDir, bool bRequireSignature);
   ProfileLoadResult LoadStatsFromDir(std::string dir, bool require_signature);
   void LoadSongsFromDir(

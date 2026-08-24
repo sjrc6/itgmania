@@ -1111,7 +1111,7 @@ void Profile::LoadCustomFunction(std::string sDir, PlayerNumber pn) {
   LUA->Release(L);
 }
 
-void Profile::HandleStatsPrefixChange(std::string dir, bool require_signature) {
+bool Profile::HandleStatsPrefixChange(std::string dir, bool require_signature) {
   // Temp variables to preserve stuff across the reload.
   // Some stuff intentionally left out because the original reason for the
   // stats prefix was to allow scores from different game types to coexist.
@@ -1168,8 +1168,10 @@ void Profile::HandleStatsPrefixChange(std::string dir, bool require_signature) {
   m_fTotalCaloriesBurned = total_calories_burned;
   m_UserTable = user_table;
   if (need_to_create_file) {
-    SaveAllToDir(dir, require_signature);
+    return SaveAllToDir(dir, require_signature);
   }
+
+  return true;
 }
 
 ProfileLoadResult Profile::LoadAllFromDir(
