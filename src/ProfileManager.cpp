@@ -147,6 +147,7 @@ void ProfileManager::Init() {
     m_bLastLoadWasFromLastGood[p] = false;
     m_bNeedToBackUpLastLoad[p] = false;
     m_bNewProfile[p] = false;
+    m_bStatsPrefixChangeFailed[p] = false;
   }
 
   LoadMachineProfile();
@@ -191,6 +192,7 @@ ProfileLoadResult ProfileManager::LoadProfile(
   m_bWasLoadedFromMemoryCard[pn] = bIsMemCard;
   m_bLastLoadWasFromLastGood[pn] = false;
   m_bNeedToBackUpLastLoad[pn] = false;
+  m_bStatsPrefixChangeFailed[pn] = false;
 
   // Try to load the original, non-backup data.
   ProfileLoadResult lr = GetProfile(pn)->LoadAllFromDir(
@@ -259,6 +261,7 @@ bool ProfileManager::LoadLocalProfileFromMachine(PlayerNumber pn) {
   m_sProfileDir[pn] = LocalProfileIDToDir(sProfileID);
   m_bWasLoadedFromMemoryCard[pn] = false;
   m_bLastLoadWasFromLastGood[pn] = false;
+  m_bStatsPrefixChangeFailed[pn] = false;
 
   if (GetLocalProfile(sProfileID) == nullptr) {
     m_sProfileDir[pn] = "";
@@ -385,6 +388,9 @@ bool ProfileManager::SaveProfile(PlayerNumber pn) const {
   if (m_sProfileDir[pn].empty()) {
     return false;
   }
+  if (m_bStatsPrefixChangeFailed[pn]) {
+    return false;
+  }
 
   /*
    * If the profile we're writing was loaded from the primary (non-backup)
@@ -425,6 +431,7 @@ void ProfileManager::UnloadProfile(PlayerNumber pn) {
   m_bLastLoadWasTamperedOrCorrupt[pn] = false;
   m_bLastLoadWasFromLastGood[pn] = false;
   m_bNeedToBackUpLastLoad[pn] = false;
+  m_bStatsPrefixChangeFailed[pn] = false;
   m_pMemoryCardProfile[pn]->InitAll();
   SONGMAN->FreeAllLoadedFromProfile((ProfileSlot)pn);
 }
@@ -1374,10 +1381,18 @@ void ProfileManager::SetStatsPrefix(const std::string& prefix) {
   }
   FOREACH_PlayerNumber(pn) {
     if (ProfileWasLoadedFromMemoryCard(pn)) {
-      // This probably runs into a problem if the memory card has been removed.
-      // -Kyz
-      GetProfile(pn)->HandleStatsPrefixChange(
+      const bool was_mounted = MEMCARDMAN->IsMounted(pn);
+      if (!was_mounted && !MEMCARDMAN->MountCard(pn)) {
+        m_bStatsPrefixChangeFailed[pn] = true;
+        continue;
+      }
+
+      m_bStatsPrefixChangeFailed[pn] = !GetProfile(pn)->HandleStatsPrefixChange(
           m_sProfileDir[pn], PREFSMAN->m_bSignProfileData);
+
+      if (!was_mounted) {
+        MEMCARDMAN->UnmountCard(pn);
+      }
     }
   }
   m_pMachineProfile->HandleStatsPrefixChange(MACHINE_PROFILE_DIR, false);
