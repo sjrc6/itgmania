@@ -33,10 +33,14 @@ void Foreground::LoadFromSong(const Song* pSong) {
   TEXTUREMAN->SetDefaultTexturePolicy(RageTextureID::TEX_VOLATILE);
 
   m_pSong = pSong;
+  const std::string songDir = pSong->GetGameplaySongDir();
+  if (songDir.empty()) {
+    return;
+  }
   for (const BackgroundChange& change : pSong->GetForegroundChanges()) {
     std::string sBGName = change.m_def.m_sFile1,
-                sLuaFile = pSong->GetSongDir() + sBGName + "/default.lua",
-                sXmlFile = pSong->GetSongDir() + sBGName + "/default.xml";
+                sLuaFile = songDir + sBGName + "/default.lua",
+                sXmlFile = songDir + sBGName + "/default.xml";
 
     LoadedBGA bga;
     if (DoesFileExist(sLuaFile)) {
@@ -44,7 +48,7 @@ void Foreground::LoadFromSong(const Song* pSong) {
     } else if (PREFSMAN->m_bQuirksMode && DoesFileExist(sXmlFile)) {
       bga.m_bga = ActorUtil::MakeActor(sXmlFile, this);
     } else {
-      bga.m_bga = ActorUtil::MakeActor(pSong->GetSongDir() + sBGName, this);
+      bga.m_bga = ActorUtil::MakeActor(songDir + sBGName, this);
     }
     if (bga.m_bga == nullptr) {
       continue;

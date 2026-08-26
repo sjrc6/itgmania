@@ -52,7 +52,7 @@ void AutoKeysounds::LoadAutoplaySoundsInto(RageSoundReader_Chain* pChain) {
   // Load sounds.
   //
   Song* pSong = GAMESTATE->m_pCurSong;
-  std::string sSongDir = pSong->GetSongDir();
+  std::string sSongDir = pSong->GetGameplaySongDir();
 
   /*
    * Add all current autoplay sounds in both players to the chain.

@@ -66,13 +66,22 @@ struct LyricSegment {
 
 /** @brief Holds all music metadata and steps for one song. */
 class Song {
+  // Custom songs keep their removable-media directory as their canonical
+  // location.  Gameplay may temporarily publish a complete, private snapshot
+  // below /@mem; wheel and catalog consumers must continue to use m_sSongDir.
   std::string m_sSongDir;
-  std::string m_pre_customify_song_dir;
+  std::string m_sGameplaySnapshotDir;
 
  public:
   void SetSongDir(const std::string sDir) { m_sSongDir = sDir; }
   std::string GetSongDir() { return m_sSongDir; }
-  std::string GetPreCustomifyDir() { return m_pre_customify_song_dir; }
+  const std::string& GetSourceSongDir() const { return m_sSongDir; }
+  const std::string& GetGameplaySnapshotDir() const {
+    return m_sGameplaySnapshotDir;
+  }
+  std::string GetGameplaySongDir() const;
+  void SetGameplaySnapshotDir(const std::string& dir);
+  void ClearGameplaySnapshotDir();
 
   /** @brief When should this song be displayed in the music wheel? */
   enum SelectionDisplay {
@@ -148,6 +157,7 @@ class Song {
   bool WasLoadedFromAutosave() const { return m_loaded_from_autosave; }
 
   const std::string& GetSongFilePath() const;
+  std::string GetGameplaySongFilePath() const;
   std::string GetCacheFilePath() const;
 
   void AddAutoGenNotes();
@@ -277,6 +287,7 @@ class Song {
   std::string GetDiscPath() const;
   std::string GetLyricsPath() const;
   std::string GetBackgroundPath() const;
+  std::string GetGameplayBackgroundPath() const;
   std::string GetCDTitlePath() const;
   std::string GetPreviewVidPath() const;
   std::string GetPreviewMusicPath() const;

@@ -333,6 +333,11 @@ PrefsManager::PrefsManager()
       m_custom_songs_load_timeout("CustomSongsLoadTimeout", 5.f),
       m_custom_songs_max_seconds("CustomSongsMaxSeconds", 120.f),
       m_custom_songs_max_megabytes("CustomSongsMaxMegabytes", 5.f),
+      m_custom_songs_snapshot_max_megabytes(
+          "CustomSongsSnapshotMaxMegabytes", 64.f),
+      m_custom_songs_allow_static_backgrounds(
+          "CustomSongsAllowStaticBackgrounds", true),
+      m_custom_songs_allow_lua("CustomSongsAllowLua", false),
 
       /* Debug: */
       m_bDebugMenuEnabled(

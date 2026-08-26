@@ -63,6 +63,7 @@ class ScreenSelectMusic : public ScreenWithMenuElements {
 
   void OpenOptionsList(PlayerNumber pn);
   void OnConfirmSongDeletion();
+  bool CacheCustomSongAsset(const std::string& path);
 
   bool can_open_options_list(PlayerNumber pn);
 
@@ -83,6 +84,10 @@ class ScreenSelectMusic : public ScreenWithMenuElements {
   void AfterMusicChange();
 
   void CheckBackgroundRequests(bool bForce);
+  void CompleteSongSelection();
+  void UpdateCustomSongSnapshot();
+  void UpdateCustomSongAssets();
+  void UpdateCustomSongSourceState();
   bool DetectCodes(const InputEventPlus& input);
   bool LoadPlayerProfile(PlayerNumber pn);
   bool LoadReadyMemoryCards();
@@ -180,6 +185,9 @@ class ScreenSelectMusic : public ScreenWithMenuElements {
   bool m_bAcceptSelectRelease[NUM_PLAYERS];
 
   bool m_bPreviewDisabled;
+  bool m_bWaitingForCustomSongSnapshot;
+  bool m_bCustomSongSourceDegraded;
+  bool m_bCardReadLease[NUM_PLAYERS];
 
   RageSound m_soundStart;
   RageSound m_soundDifficultyEasier;
@@ -188,6 +196,8 @@ class ScreenSelectMusic : public ScreenWithMenuElements {
   RageSound m_soundLocked;
 
   BackgroundLoader m_BackgroundLoader;
+  BackgroundLoader m_CustomSongAssetLoader;
+  std::vector<std::string> m_CustomSongAssetRequests;
   RageTexturePreloader m_TexturePreload;
 
   Song* m_pSongAwaitingDeletionConfirmation;

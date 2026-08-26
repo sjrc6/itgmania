@@ -83,6 +83,24 @@ static const std::string MEM_CARD_MOUNT_POINT_INTERNAL[NUM_PLAYERS] = {
     "/@mc2int/",
 };
 
+static std::string GetDeviceIdentity(const UsbStorageDevice& device) {
+  if (device.IsBlank()) {
+    return std::string();
+  }
+  if (!device.sSerial.empty() && device.sSerial != "none") {
+    return ssprintf(
+        "%04x:%04x:serial:%s:%s:%d", device.idVendor, device.idProduct,
+        device.sSerial.c_str(), device.sVolumeLabel.c_str(),
+        device.iVolumeSizeMB);
+  }
+  // Device nodes and sysfs block names may change after reinsertion.  For
+  // media without a serial, use the physical USB topology plus volume facts.
+  return ssprintf(
+      "%04x:%04x:port:%d:%d:%d:%s:%d", device.idVendor, device.idProduct,
+      device.iBus, device.iPort, device.iLevel, device.sVolumeLabel.c_str(),
+      device.iVolumeSizeMB);
+}
+
 // Only access the memory card driver in a timeout-safe thread.
 class ThreadedMemoryCardWorker : public RageWorkerThread {
  public:
@@ -277,6 +295,10 @@ MemoryCardManager::MemoryCardManager() {
   FOREACH_PlayerNumber(p) {
     m_bCardLocked[p] = false;
     m_bMounted[p] = false;
+    m_bPhysicalMounted[p] = false;
+    m_iMountRefs[p] = 0;
+    m_iConsecutiveReadFailures[p] = 0;
+    m_bSourceDegraded[p] = false;
     m_State[p] = MemoryCardState_NoCard;
   }
 
@@ -436,7 +458,8 @@ void MemoryCardManager::CheckStateChanges() {
           state = MemoryCardState_Removed;
         }
         if (new_device.m_State == UsbStorageDevice::STATE_READY) {
-          if (m_FinalDevice[p].sSerial != new_device.sSerial) {
+          if (GetDeviceIdentity(m_FinalDevice[p]) !=
+              GetDeviceIdentity(new_device)) {
             // A different card is inserted than we had when we finalized.
             state = MemoryCardState_Error;
             sError = "Changed";
@@ -501,6 +524,53 @@ void MemoryCardManager::CheckStateChanges() {
       m_State[p] = state;
       m_StateChangedAt[p].Touch();
       m_sError[p] = sError;
+
+      if (state == MemoryCardState_Removed ||
+          state == MemoryCardState_NoCard) {
+        m_bSourceDegraded[p] = true;
+        if (m_bPhysicalMounted[p]) {
+          // Keep logical leases alive so reconnecting the same locked device
+          // can resume previews, but sever the stale filesystem immediately.
+          RageFileDriver* driver =
+              FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[p]);
+          if (driver != nullptr) {
+            driver->Remount("(empty)");
+            FILEMAN->ReleaseFileDriver(driver);
+          }
+          g_pWorker->Unmount(&m_MountedDevice[p]);
+          m_bPhysicalMounted[p] = false;
+          // A newly reinserted device enters CHECKING.  Permit the normal
+          // validation cycle while no stale filesystem is exposed.
+          g_pWorker->SetMountThreadState(
+              ThreadedMemoryCardWorker::detect_and_mount);
+        }
+      } else if (state == MemoryCardState_Ready &&
+                 LastState != MemoryCardState_Ready) {
+        m_iConsecutiveReadFailures[p] = 0;
+        m_bSourceDegraded[p] = false;
+
+        // A read lease can outlive a temporary disconnect.  Reconnect only
+        // when the stable identity still matches the locked profile card.
+        if (m_iMountRefs[p] > 0 && !m_bPhysicalMounted[p] &&
+            (m_FinalDevice[p].IsBlank() ||
+             GetDeviceIdentity(m_FinalDevice[p]) ==
+                 GetDeviceIdentity(m_Device[p]))) {
+          RefreshCardAccessTimeout();
+          if (g_pWorker->Mount(&m_Device[p])) {
+            m_MountedDevice[p] = m_Device[p];
+            m_bPhysicalMounted[p] = true;
+            RageFileDriver* driver =
+                FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[p]);
+            if (driver != nullptr) {
+              driver->Remount(m_Device[p].sOsMountDir);
+              FILEMAN->ReleaseFileDriver(driver);
+            }
+            FILEMAN->FlushDirCache(MEM_CARD_MOUNT_POINT[p]);
+            g_pWorker->SetMountThreadState(
+                ThreadedMemoryCardWorker::detect_and_dont_mount);
+          }
+        }
+      }
     }
   }
 
@@ -584,13 +654,35 @@ bool MemoryCardManager::MountCard(PlayerNumber pn, int iTimeout) {
   }
   ASSERT(!m_Device[pn].IsBlank());
 
-  // Pause the mounting thread when we mount the first drive.
+  RefreshCardAccessTimeout(static_cast<float>(iTimeout));
+  if (m_iMountRefs[pn] > 0) {
+    if (!m_bPhysicalMounted[pn]) {
+      if (!g_pWorker->Mount(&m_Device[pn])) {
+        return false;
+      }
+      m_MountedDevice[pn] = m_Device[pn];
+      m_bPhysicalMounted[pn] = true;
+      RageFileDriver* existingDriver =
+          FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
+      if (existingDriver != nullptr) {
+        existingDriver->Remount(m_Device[pn].sOsMountDir);
+        FILEMAN->ReleaseFileDriver(existingDriver);
+      }
+      FILEMAN->FlushDirCache(MEM_CARD_MOUNT_POINT[pn]);
+    }
+    ++m_iMountRefs[pn];
+    m_bMounted[pn] = true;
+    return true;
+  }
+
+  // Continue polling for removal while cards are leased.  The driver must not
+  // run write tests or auto-mount from its heartbeat during explicit access.
   bool bStartingMemoryCardAccess = true;
   FOREACH_PlayerNumber(p) if (m_bMounted[p]) bStartingMemoryCardAccess =
       false;  // already did
   if (bStartingMemoryCardAccess) {
-    // We're starting to do stuff to the memory cards.
-    this->PauseMountingThread(iTimeout);
+    g_pWorker->SetMountThreadState(
+        ThreadedMemoryCardWorker::detect_and_dont_mount);
   }
 
   if (!g_pWorker->Mount(&m_Device[pn])) {
@@ -603,6 +695,9 @@ bool MemoryCardManager::MountCard(PlayerNumber pn, int iTimeout) {
   }
 
   m_bMounted[pn] = true;
+  m_bPhysicalMounted[pn] = true;
+  m_iMountRefs[pn] = 1;
+  m_MountedDevice[pn] = m_Device[pn];
 
   RageFileDriver* pDriver =
       FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
@@ -639,11 +734,12 @@ bool MemoryCardManager::MountCard(
 void MemoryCardManager::UnmountCard(PlayerNumber pn) {
   LOG->Trace(
       "MemoryCardManager::UnmountCard(%i) (mounted: %i)", pn, m_bMounted[pn]);
-  if (m_Device[pn].IsBlank()) {
+  if (!m_bMounted[pn] || m_iMountRefs[pn] <= 0) {
     return;
   }
 
-  if (!m_bMounted[pn]) {
+  --m_iMountRefs[pn];
+  if (m_iMountRefs[pn] > 0) {
     return;
   }
 
@@ -652,8 +748,16 @@ void MemoryCardManager::UnmountCard(PlayerNumber pn) {
   this->RefreshCardAccessTimeout();
 
   // Leave our own filesystem drivers mounted.  Unmount the kernel mount.
-  if (!g_pWorker->Unmount(&m_Device[pn])) {
+  if (m_bPhysicalMounted[pn] &&
+      !g_pWorker->Unmount(&m_MountedDevice[pn])) {
     LOG->Warn("MemoryCardManager::UnmountCard: unmount failed");
+  }
+
+  RageFileDriver* driver =
+      FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
+  if (driver != nullptr) {
+    driver->Remount("(empty)");
+    FILEMAN->ReleaseFileDriver(driver);
   }
 
   // Flush mountpoints pointing to what we've unmounted.
@@ -661,6 +765,8 @@ void MemoryCardManager::UnmountCard(PlayerNumber pn) {
   FILEMAN->FlushDirCache(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
 
   m_bMounted[pn] = false;
+  m_bPhysicalMounted[pn] = false;
+  m_MountedDevice[pn].MakeBlank();
 
   // Unpause the mounting thread when we unmount the last drive.
   bool bNeedUnpause = true;
@@ -692,6 +798,27 @@ std::string MemoryCardManager::GetName(PlayerNumber pn) const {
   return m_Device[pn].sName;
 }
 
+std::string MemoryCardManager::GetCardDeviceIdentity(PlayerNumber pn) const {
+  return GetDeviceIdentity(m_Device[pn]);
+}
+
+void MemoryCardManager::ReportCardRead(
+    const std::string& path, bool success) {
+  FOREACH_PlayerNumber(pn) {
+    if (CompareNoCase(
+            Left(path, MEM_CARD_MOUNT_POINT[pn].size()),
+            MEM_CARD_MOUNT_POINT[pn])) {
+      continue;
+    }
+    if (success) {
+      m_iConsecutiveReadFailures[pn] = 0;
+    } else if (++m_iConsecutiveReadFailures[pn] >= 3) {
+      m_bSourceDegraded[pn] = true;
+    }
+    return;
+  }
+}
+
 void MemoryCardManager::PauseMountingThread(int iTimeout) {
   LOG->Trace("MemoryCardManager::PauseMountingThread");
 
@@ -705,8 +832,10 @@ void MemoryCardManager::PauseMountingThread(int iTimeout) {
 // Possibly each successful file system operation could adjust the
 // timeout by some amount, but that requires a more thoughtful implementation.
 void MemoryCardManager::RefreshCardAccessTimeout(float fTimeout) {
-  g_pWorker->SetTimeout(fTimeout);
-  RageFileDriverTimeout::SetTimeout(fTimeout);
+  g_pWorker->SetTimeout(-1);
+  g_pWorker->SetRequestTimeout(fTimeout);
+  RageFileDriverTimeout::SetTimeout(-1);
+  RageFileDriverTimeout::SetRequestTimeout(fTimeout);
 }
 
 void MemoryCardManager::UnPauseMountingThread() {
@@ -716,7 +845,9 @@ void MemoryCardManager::UnPauseMountingThread() {
 
   // End the timeout period.
   g_pWorker->SetTimeout(-1);
+  g_pWorker->SetRequestTimeout(-1);
   RageFileDriverTimeout::SetTimeout(-1);
+  RageFileDriverTimeout::SetRequestTimeout(-1);
 }
 
 // lua start

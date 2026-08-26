@@ -20,6 +20,7 @@ class RageFileDriverTimeout : public RageFileDriver {
   bool Remove(const std::string& sPath);
 
   static void SetTimeout(float fSeconds);
+  static void SetRequestTimeout(float fSeconds);
   static void ResetTimeout() { SetTimeout(-1); }
 
  private:

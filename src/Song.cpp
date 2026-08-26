@@ -263,6 +263,19 @@ const std::string& Song::GetSongFilePath() const {
   return m_sSongFileName;
 }
 
+std::string Song::GetGameplaySongFilePath() const {
+  if (m_sGameplaySnapshotDir.empty()) {
+    return m_sSongFileName;
+  }
+  std::string relative = m_sSongFileName;
+  if (CompareNoCase(Left(relative, m_sSongDir.size()), m_sSongDir) == 0) {
+    relative.erase(0, m_sSongDir.size());
+  } else {
+    relative = Basename(relative);
+  }
+  return m_sGameplaySnapshotDir + relative;
+}
+
 /* If PREFSMAN->m_bFastLoad is true, always load from cache if possible.
  * Don't read the contents of sDir if we can avoid it. That means we can't call
  * HasMusic(), HasBanner() or GetHashForDirectory().
@@ -414,15 +427,9 @@ bool Song::LoadFromSongDir(
       LOG->Trace("Custom song %s music file is too big.", m_sSongDir.c_str());
       return false;
     }
-    m_pre_customify_song_dir = m_sSongDir;
-    m_sSongDir = custom_songify_path(m_sSongDir);
-    m_sBannerFile.clear();
-    m_sJacketFile.clear();
-    m_sCDFile.clear();
-    m_sDiscFile.clear();
-    m_sLyricsFile.clear();
-    m_sBackgroundFile.clear();
-    m_sCDTitleFile.clear();
+    // Keep the real removable-media path.  Optional wheel assets are read
+    // from this location while the card has a screen-lifetime read lease.
+    // Gameplay paths are switched only after a complete snapshot is ready.
   }
 
   // Normally TidyUpData would handle setting the m_fBeat0GroupOffsetInSeconds.
@@ -438,9 +445,6 @@ bool Song::LoadFromSongDir(
 
   for (Steps* s : m_vpSteps) {
     s->m_Timing.m_fBeat0GroupOffsetInSeconds = fOffset;
-    if (m_LoadedFromProfile != ProfileSlot_Invalid) {
-      s->ChangeFilenamesForCustomSong();
-    }
     /* Compress all Steps. During initial caching, this will remove cached
      * NoteData; during cached loads, this will just remove cached SMData. */
     s->Compress();
@@ -1537,23 +1541,34 @@ bool Song::HasMusic() const {
     return true;
   }
 
-  return m_sMusicFile != "" && IsAFile(GetMusicPath());
+  return m_sMusicFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetMusicPath()));
 }
 bool Song::HasBanner() const {
-  return m_sBannerFile != "" && IsAFile(GetBannerPath());
+  return m_sBannerFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetBannerPath()));
 }
 bool Song::HasInstrumentTrack(InstrumentTrack it) const {
   return m_sInstrumentTrackFile[it] != "" &&
-         IsAFile(GetInstrumentTrackPath(it));
+         (m_LoadedFromProfile != ProfileSlot_Invalid ||
+          IsAFile(GetInstrumentTrackPath(it)));
 }
 bool Song::HasLyrics() const {
-  return m_sLyricsFile != "" && IsAFile(GetLyricsPath());
+  return m_sLyricsFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetLyricsPath()));
 }
 bool Song::HasBackground() const {
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    if (m_sGameplaySnapshotDir.empty()) {
+      return m_sBackgroundFile != "";
+    }
+    return m_sBackgroundFile != "" && IsAFile(GetGameplayBackgroundPath());
+  }
   return m_sBackgroundFile != "" && IsAFile(GetBackgroundPath());
 }
 bool Song::HasCDTitle() const {
-  return m_sCDTitleFile != "" && IsAFile(GetCDTitlePath());
+  return m_sCDTitleFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetCDTitlePath()));
 }
 bool Song::HasBGChanges() const {
   FOREACH_BackgroundLayer(i) {
@@ -1565,15 +1580,21 @@ bool Song::HasBGChanges() const {
 }
 bool Song::HasAttacks() const { return !m_Attacks.empty(); }
 bool Song::HasJacket() const {
-  return m_sJacketFile != "" && IsAFile(GetJacketPath());
+  return m_sJacketFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetJacketPath()));
 }
 bool Song::HasDisc() const {
-  return m_sDiscFile != "" && IsAFile(GetDiscPath());
+  return m_sDiscFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetDiscPath()));
 }
 bool Song::HasCDImage() const {
-  return m_sCDFile != "" && IsAFile(GetCDImagePath());
+  return m_sCDFile != "" &&
+         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetCDImagePath()));
 }
 bool Song::HasPreviewVid() const {
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
   return m_sPreviewVidFile != "" && IsAFile(GetPreviewVidPath());
 }
 
@@ -1727,53 +1748,141 @@ std::string Song::GetSongAssetPath(
   return sPath;
 }
 
+static std::string GetSnapshotAssetPath(
+    std::string path, const std::string& sourceDir,
+    const std::string& snapshotDir) {
+  if (path.empty()) {
+    return std::string();
+  }
+
+  FixSlashesInPlace(path);
+  std::string relative = path;
+  if (CompareNoCase(Left(relative, sourceDir.size()), sourceDir) == 0) {
+    relative.erase(0, sourceDir.size());
+  }
+  CollapsePath(relative);
+  if (relative.empty() || relative[0] == '/' || Left(relative, 3) == "../") {
+    relative = Basename(path);
+  }
+  return snapshotDir + relative;
+}
+
 /* Note that supplying a path relative to the top-level directory is only for
  * compatibility with DWI. We prefer paths relative to the song directory. */
 std::string Song::GetMusicPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sMusicFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sMusicFile, m_sSongDir);
 }
 
 std::string Song::GetInstrumentTrackPath(InstrumentTrack it) const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sInstrumentTrackFile[it], m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sInstrumentTrackFile[it], m_sSongDir);
 }
 
 std::string Song::GetBannerPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sBannerFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sBannerFile, m_sSongDir);
 }
 
 std::string Song::GetLyricsPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sLyricsFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sLyricsFile, m_sSongDir);
 }
 
 std::string Song::GetCDTitlePath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sCDTitleFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sCDTitleFile, m_sSongDir);
 }
 
 std::string Song::GetBackgroundPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sBackgroundFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sBackgroundFile, m_sSongDir);
 }
 
+std::string Song::GetGameplayBackgroundPath() const {
+  return GetBackgroundPath();
+}
+
 std::string Song::GetJacketPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sJacketFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sJacketFile, m_sSongDir);
 }
 
 std::string Song::GetDiscPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sDiscFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sDiscFile, m_sSongDir);
 }
 
 std::string Song::GetCDImagePath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sCDFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sCDFile, m_sSongDir);
 }
 
 std::string Song::GetPreviewVidPath() const {
+  if (!m_sGameplaySnapshotDir.empty()) {
+    return GetSnapshotAssetPath(
+        m_sPreviewVidFile, m_sSongDir, m_sGameplaySnapshotDir);
+  }
   return GetSongAssetPath(m_sPreviewVidFile, m_sSongDir);
 }
 
 std::string Song::GetPreviewMusicPath() const {
   if (m_PreviewFile.empty()) {
-    return GetMusicPath();
+    return GetSongAssetPath(m_sMusicFile, m_sSongDir);
   }
   return GetSongAssetPath(m_PreviewFile, m_sSongDir);
+}
+
+std::string Song::GetGameplaySongDir() const {
+  if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+    return m_sSongDir;
+  }
+  return m_sGameplaySnapshotDir;
+}
+
+void Song::SetGameplaySnapshotDir(const std::string& dir) {
+  ASSERT(m_LoadedFromProfile != ProfileSlot_Invalid);
+  m_sGameplaySnapshotDir = dir;
+  if (!m_sGameplaySnapshotDir.empty() && Right(m_sGameplaySnapshotDir, 1) != "/") {
+    m_sGameplaySnapshotDir += "/";
+  }
+  for (Steps* steps : m_vpSteps) {
+    steps->SetCustomSongSnapshotDir(m_sGameplaySnapshotDir);
+  }
+}
+
+void Song::ClearGameplaySnapshotDir() {
+  for (Steps* steps : m_vpSteps) {
+    steps->SetCustomSongSnapshotDir("");
+  }
+  m_sGameplaySnapshotDir.clear();
 }
 
 float Song::GetPreviewStartSeconds() const {
@@ -2064,7 +2173,13 @@ class LunaSong : public Luna<Song> {
     return 1;
   }
   static int GetSongDir(T* p, lua_State* L) {
-    lua_pushstring(L, p->GetSongDir().c_str());
+    const std::string gameplayDir = p->GetGameplaySongDir();
+    lua_pushstring(
+        L, (gameplayDir.empty() ? p->GetSourceSongDir() : gameplayDir).c_str());
+    return 1;
+  }
+  static int GetSourceSongDir(T* p, lua_State* L) {
+    lua_pushstring(L, p->GetSourceSongDir().c_str());
     return 1;
   }
   static int GetMusicPath(T* p, lua_State* L) {
@@ -2154,7 +2269,7 @@ class LunaSong : public Luna<Song> {
     return 1;
   }
   static int GetSongFilePath(T* p, lua_State* L) {
-    lua_pushstring(L, p->GetSongFilePath().c_str());
+    lua_pushstring(L, p->GetGameplaySongFilePath().c_str());
     return 1;
   }
   static int IsTutorial(T* p, lua_State* L) {
@@ -2388,6 +2503,7 @@ class LunaSong : public Luna<Song> {
     ADD_METHOD(GetAllSteps);
     ADD_METHOD(GetStepsByStepsType);
     ADD_METHOD(GetSongDir);
+    ADD_METHOD(GetSourceSongDir);
     ADD_METHOD(GetMusicPath);
     ADD_METHOD(GetBannerPath);
     ADD_METHOD(GetBackgroundPath);

@@ -171,7 +171,7 @@ class Steps {
   const std::string GetGrooveStatsHash() const;
   int GetGrooveStatsHashVersion() const;
 
-  void ChangeFilenamesForCustomSong();
+  void SetCustomSongSnapshotDir(const std::string& dir);
 
   void SetLoadedFromProfile(ProfileSlot slot) { m_LoadedFromProfile = slot; }
   void SetMeter(int meter);
@@ -310,6 +310,7 @@ class Steps {
 
   /** @brief The name of the file where these steps are stored. */
   std::string m_sFilename;
+  std::string m_sCustomSongSourceFilename;
   /** @brief true if these Steps were loaded from or saved to disk. */
   bool m_bSavedToDisk;
   /** @brief allows the steps to specify their own music file. */

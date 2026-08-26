@@ -357,6 +357,9 @@ class PrefsManager {
   Preference<float> m_custom_songs_load_timeout;
   Preference<float> m_custom_songs_max_seconds;
   Preference<float> m_custom_songs_max_megabytes;
+  Preference<float> m_custom_songs_snapshot_max_megabytes;
+  Preference<bool> m_custom_songs_allow_static_backgrounds;
+  Preference<bool> m_custom_songs_allow_lua;
 
   // Debug:
   Preference<bool> m_bDebugMenuEnabled;

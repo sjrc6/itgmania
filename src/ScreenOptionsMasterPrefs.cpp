@@ -741,6 +741,11 @@ static void CustomSongsMaxMegabytes(
   int mapping[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 1000};
   MoveMap(sel, conf_option, to_sel, mapping, ARRAYLEN(mapping));
 }
+static void CustomSongsSnapshotMaxMegabytes(
+    int& sel, bool to_sel, const ConfOption* conf_option) {
+  int mapping[] = {8, 16, 32, 64, 96, 128, 256};
+  MoveMap(sel, conf_option, to_sel, mapping, ARRAYLEN(mapping));
+}
 static std::vector<ConfOption> g_ConfOptions;
 static void InitializeConfOptions() {
   if (!g_ConfOptions.empty()) {
@@ -891,6 +896,12 @@ static void InitializeConfOptions() {
   ADD(ConfOption(
       "CustomSongsMaxMegabytes", CustomSongsMaxMegabytes, "1", "2", "3", "4",
       "5", "6", "7", "8", "9", "10", "20", "30", "1000"));
+  ADD(ConfOption(
+      "CustomSongsSnapshotMaxMegabytes", CustomSongsSnapshotMaxMegabytes, "8",
+      "16", "32", "64", "96", "128", "256"));
+  ADD(ConfOption(
+      "CustomSongsAllowStaticBackgrounds", MovePref<bool>, "Off", "On"));
+  ADD(ConfOption("CustomSongsAllowLua", MovePref<bool>, "Off", "On"));
 
   // Machine options
   ADD(ConfOption("MenuTimer", MovePref<bool>, "Off", "On"));

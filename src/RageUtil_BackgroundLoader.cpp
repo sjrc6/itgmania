@@ -1,12 +1,17 @@
 #include "RageUtil_BackgroundLoader.h"
 
+#include <chrono>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "RageFile.h"
 #include "RageFileManager.h"
 #include "RageLog.h"
+#include "MemoryCardManager.h"
+#include "RageSurface.h"
+#include "RageSurface_Load.h"
 #include "RageThreads.h"
 #include "RageUtil.h"
 #include "global.h"
@@ -19,7 +24,14 @@
  * use. */
 static const bool g_bWriteToCache = true;
 
-static const bool g_bEnableBackgroundLoading = false;
+static const bool g_bEnableBackgroundLoading = true;
+static const int g_iMaximumCachedAssetBytes = 8 * 1000 * 1000;
+static const int g_iMaximumCachedAssetDimension = 4096;
+static const int64_t g_iMaximumCachedAssetPixels = 16 * 1000 * 1000;
+
+static bool NeedsPrivateCache(const std::string& path) {
+  return MEMCARDMAN != nullptr && MEMCARDMAN->PathIsMemCard(path);
+}
 
 BackgroundLoader::BackgroundLoader()
     : m_StartSem("BackgroundLoaderSem"), m_Mutex("BackgroundLoaderMutex") {
@@ -27,7 +39,7 @@ BackgroundLoader::BackgroundLoader()
     return;
   }
 
-  m_sCachePathPrefix = ssprintf("@mem/%p", static_cast<void*>(this));
+  m_sCachePathPrefix = ssprintf("/@mem/wheel-assets/%p", static_cast<void*>(this));
 
   m_bShutdownThread = false;
   m_sThreadIsActive = m_sThreadShouldAbort = false;
@@ -58,9 +70,16 @@ BackgroundLoader::~BackgroundLoader() {
   m_LoadThread.Wait();
 
   /* Delete all leftover cached files. */
-  std::map<std::string, int>::iterator it;
-  for (it = m_FinishedRequests.begin(); it != m_FinishedRequests.end(); ++it) {
-    FILEMAN->Remove(GetCachePath(it->first));
+  for (;;) {
+    std::string file;
+    {
+      LockMut(m_Mutex);
+      if (m_FinishedRequests.empty()) {
+        break;
+      }
+      file = m_FinishedRequests.begin()->first;
+    }
+    FinishedWithCachedFile(file);
   }
 
   /* m_sCachePathPrefix should be filled with several empty directories.  Delete
@@ -82,6 +101,7 @@ std::string BackgroundLoader::GetRequest() {
   std::string ret;
   ret = m_CacheRequests.front();
   m_CacheRequests.erase(m_CacheRequests.begin(), m_CacheRequests.begin() + 1);
+  m_sThreadIsActive = true;
   return ret;
 }
 
@@ -114,15 +134,15 @@ void BackgroundLoader::LoadThread() {
       }
     }
 
-    m_sThreadIsActive = true;
-
     LOG->Trace("XXX: reading %s", sFile.c_str());
 
     std::string sCachePath = GetCachePath(sFile);
 
     /* Open the file and read it. */
     RageFile src;
-    if (src.Open(sFile)) {
+    bool readSucceeded = false;
+    if (src.Open(sFile) && src.GetFileSize() >= 0 &&
+        src.GetFileSize() <= g_iMaximumCachedAssetBytes) {
       /* If we're writing to a file cache ... */
       RageFile dst;
 
@@ -135,6 +155,9 @@ void BackgroundLoader::LoadThread() {
       char buf[1024 * 4];
       while (!m_sThreadShouldAbort && !src.AtEOF()) {
         int got = src.Read(buf, sizeof(buf));
+        if (got < 0) {
+          break;
+        }
         if (got > 0 && bWriteToCache) {
           dst.Write(buf, got);
         }
@@ -143,9 +166,40 @@ void BackgroundLoader::LoadThread() {
         dst.Close();
       }
 
+      readSucceeded = src.GetError().empty() &&
+                      (!bWriteToCache || dst.GetError().empty()) &&
+                      !m_sThreadShouldAbort;
+
+      // Validate and decode away from the screen thread.  The decoded surface
+      // is deliberately disposable; the bounded /@mem copy is what the main
+      // thread later uploads as a texture.
+      if (readSucceeded && bWriteToCache) {
+        std::string error;
+        RageSurface* header =
+            RageSurfaceUtils::LoadFile(sCachePath, error, true);
+        readSucceeded = header != nullptr && header->w > 0 && header->h > 0 &&
+                        header->w <= g_iMaximumCachedAssetDimension &&
+                        header->h <= g_iMaximumCachedAssetDimension &&
+                        static_cast<int64_t>(header->w) * header->h <=
+                            g_iMaximumCachedAssetPixels;
+        delete header;
+        if (readSucceeded) {
+          RageSurface* decoded =
+              RageSurfaceUtils::LoadFile(sCachePath, error, false);
+          readSucceeded = decoded != nullptr;
+          delete decoded;
+        }
+      }
       LOG->Trace("XXX: done");
     }
     src.Close();
+    if (MEMCARDMAN != nullptr) {
+      MEMCARDMAN->ReportCardRead(sFile, readSucceeded);
+    }
+
+    if (!readSucceeded) {
+      FILEMAN->Remove(sCachePath);
+    }
 
     LockMut(m_Mutex);
     if (!m_sThreadShouldAbort) {
@@ -169,7 +223,7 @@ void BackgroundLoader::CacheFile(const std::string& sFile) {
     return;
   }
 
-  if (sFile == "") {
+  if (sFile == "" || !NeedsPrivateCache(sFile)) {
     return;
   }
 
@@ -181,6 +235,11 @@ void BackgroundLoader::CacheFile(const std::string& sFile) {
 bool BackgroundLoader::IsCacheFileFinished(
     const std::string& sFile, std::string& sActualPath) {
   if (!g_bEnableBackgroundLoading) {
+    sActualPath = sFile;
+    return true;
+  }
+
+  if (!NeedsPrivateCache(sFile)) {
     sActualPath = sFile;
     return true;
   }
@@ -213,18 +272,27 @@ void BackgroundLoader::FinishedWithCachedFile(std::string sFile) {
     return;
   }
 
-  if (sFile == "") {
+  if (sFile == "" || !NeedsPrivateCache(sFile)) {
     return;
   }
 
-  std::map<std::string, int>::iterator it;
-  it = m_FinishedRequests.find(sFile);
-  ASSERT_M(it != m_FinishedRequests.end(), sFile);
+  bool remove = false;
+  {
+    LockMut(m_Mutex);
+    std::map<std::string, int>::iterator it;
+    it = m_FinishedRequests.find(sFile);
+    if (it == m_FinishedRequests.end()) {
+      return;
+    }
 
-  --it->second;
-  ASSERT_M(it->second >= 0, ssprintf("%i", it->second));
-  if (!it->second) {
-    m_FinishedRequests.erase(it);
+    --it->second;
+    ASSERT_M(it->second >= 0, ssprintf("%i", it->second));
+    if (!it->second) {
+      m_FinishedRequests.erase(it);
+      remove = true;
+    }
+  }
+  if (remove) {
     FILEMAN->Remove(GetCachePath(sFile));
   }
 }
@@ -234,19 +302,27 @@ void BackgroundLoader::Abort() {
     return;
   }
 
-  LockMut(m_Mutex);
-
-  /* Clear any pending requests. */
-  while (!GetRequest().empty());
-
-  /* Clear any previously finished requests. */
-  while (m_FinishedRequests.size()) {
-    FinishedWithCachedFile(m_FinishedRequests.begin()->first);
+  std::vector<std::string> finished;
+  {
+    LockMut(m_Mutex);
+    m_CacheRequests.clear();
+    for (const auto& request : m_FinishedRequests) {
+      finished.push_back(request.first);
+    }
+    m_FinishedRequests.clear();
+    if (m_sThreadIsActive) {
+      m_sThreadShouldAbort = true;
+    }
   }
+  for (const std::string& file : finished) {
+    FILEMAN->Remove(GetCachePath(file));
+  }
+}
 
-  /* Tell the thread to abort any request it's handling now. */
-  if (m_sThreadIsActive) {
-    m_sThreadShouldAbort = true;
+void BackgroundLoader::AbortAndWait() {
+  Abort();
+  while (m_sThreadIsActive) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
 

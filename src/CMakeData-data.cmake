@@ -153,6 +153,7 @@ source_group("Data Structures\\\\Score Keepers"
              ${SM_DATA_SCORE_HPP})
 
 list(APPEND SM_DATA_SONG_SRC
+            "CustomSongSnapshot.cpp"
             "Group.cpp"
             "Song.cpp"
             "SongCacheIndex.cpp"
@@ -161,6 +162,7 @@ list(APPEND SM_DATA_SONG_SRC
             "SongUtil.cpp")
 
 list(APPEND SM_DATA_SONG_HPP
+            "CustomSongSnapshot.h"
             "Group.h"
             "Song.h"
             "SongCacheIndex.h"

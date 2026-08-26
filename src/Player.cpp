@@ -833,7 +833,7 @@ void Player::Load() {
   // (perhaps in a separate object, used alongside ScreenGameplay::m_pSoundMusic
   // and ScreenEdit::m_pSoundMusic?) We don't have to load separate copies to
   // set player fade: always make a copy, and set the fade on the copy.
-  std::string sSongDir = pSong->GetSongDir();
+  std::string sSongDir = pSong->GetGameplaySongDir();
   m_vKeysounds.resize(pSong->m_vsKeysoundFile.size());
 
   // parameters are invalid somehow... -aj

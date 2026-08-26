@@ -1,6 +1,7 @@
 #ifndef MemoryCardManager_H
 #define MemoryCardManager_H
 
+#include <atomic>
 #include <string>
 #include <vector>
 
@@ -34,9 +35,18 @@ class MemoryCardManager {
   bool MountCard(PlayerNumber pn, int iTimeout = 10);
   bool MountCard(PlayerNumber pn, const UsbStorageDevice& d, int iTimeout = 10);
   void UnmountCard(PlayerNumber pn);
+  bool AcquireCardReadLease(PlayerNumber pn, int operationTimeout = 5) {
+    return MountCard(pn, operationTimeout);
+  }
+  void ReleaseCardReadLease(PlayerNumber pn) { UnmountCard(pn); }
 
   void RefreshCardAccessTimeout(float fTimeout = 10.0f);
   bool IsMounted(PlayerNumber pn) const { return m_bMounted[pn]; }
+  std::string GetCardDeviceIdentity(PlayerNumber pn) const;
+  void ReportCardRead(const std::string& path, bool success);
+  bool IsCardSourceDegraded(PlayerNumber pn) const {
+    return m_bSourceDegraded[pn];
+  }
 
   // When paused, no changes in memory card state will be noticed until
   // unpaused.
@@ -72,12 +82,17 @@ class MemoryCardManager {
 
   bool m_bCardLocked[NUM_PLAYERS];
   bool m_bMounted[NUM_PLAYERS];  // card is currently mounted
+  bool m_bPhysicalMounted[NUM_PLAYERS];
+  int m_iMountRefs[NUM_PLAYERS];
+  std::atomic<int> m_iConsecutiveReadFailures[NUM_PLAYERS];
+  std::atomic<bool> m_bSourceDegraded[NUM_PLAYERS];
 
   UsbStorageDevice
       m_Device[NUM_PLAYERS];  // device in the memory card slot, blank if none
   UsbStorageDevice
       m_FinalDevice[NUM_PLAYERS];  // device in the memory card slot when we
                                    // finalized, blank if none
+  UsbStorageDevice m_MountedDevice[NUM_PLAYERS];
 
   MemoryCardState m_State[NUM_PLAYERS];
   RageTimer m_StateChangedAt[NUM_PLAYERS];

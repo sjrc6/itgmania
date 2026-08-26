@@ -213,10 +213,14 @@ void BackgroundUtil::GetSongBGAnimations(
     std::vector<std::string>& vsPathsOut,
     std::vector<std::string>& vsNamesOut) {
   vsPathsOut.clear();
+  const std::string songDir = pSong->GetGameplaySongDir();
+  if (songDir.empty()) {
+    return;
+  }
   if (sMatch.empty()) {
-    GetDirListing(pSong->GetSongDir() + "*", vsPathsOut, true, true);
+    GetDirListing(songDir + "*", vsPathsOut, true, true);
   } else {
-    GetDirListing(pSong->GetSongDir() + sMatch, vsPathsOut, true, true);
+    GetDirListing(songDir + sMatch, vsPathsOut, true, true);
   }
 
   vsNamesOut.clear();
@@ -232,12 +236,16 @@ void BackgroundUtil::GetSongMovies(
     std::vector<std::string>& vsPathsOut,
     std::vector<std::string>& vsNamesOut) {
   vsPathsOut.clear();
+  const std::string songDir = pSong->GetGameplaySongDir();
+  if (songDir.empty()) {
+    return;
+  }
   if (sMatch.empty()) {
     FILEMAN->GetDirListingWithMultipleExtensions(
-        pSong->GetSongDir() + sMatch, ActorUtil::GetTypeExtensionList(FT_Movie),
+        songDir + sMatch, ActorUtil::GetTypeExtensionList(FT_Movie),
         vsPathsOut, false, true);
   } else {
-    GetDirListing(pSong->GetSongDir() + sMatch, vsPathsOut, false, true);
+    GetDirListing(songDir + sMatch, vsPathsOut, false, true);
   }
 
   vsNamesOut.clear();
@@ -253,12 +261,16 @@ void BackgroundUtil::GetSongBitmaps(
     std::vector<std::string>& vsPathsOut,
     std::vector<std::string>& vsNamesOut) {
   vsPathsOut.clear();
+  const std::string songDir = pSong->GetGameplaySongDir();
+  if (songDir.empty()) {
+    return;
+  }
   if (sMatch.empty()) {
     FILEMAN->GetDirListingWithMultipleExtensions(
-        pSong->GetSongDir() + sMatch,
+        songDir + sMatch,
         ActorUtil::GetTypeExtensionList(FT_Bitmap), vsPathsOut, false, true);
   } else {
-    GetDirListing(pSong->GetSongDir() + sMatch, vsPathsOut, false, true);
+    GetDirListing(songDir + sMatch, vsPathsOut, false, true);
   }
 
   vsNamesOut.clear();

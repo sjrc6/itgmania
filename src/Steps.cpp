@@ -474,11 +474,27 @@ void Steps::CalculateMeasureInfo(const NoteData& tempNoteData) {
   }
 }
 
-void Steps::ChangeFilenamesForCustomSong() {
-  m_sFilename = custom_songify_path(m_sFilename);
-  if (!m_MusicFile.empty()) {
-    m_MusicFile = custom_songify_path(m_MusicFile);
+void Steps::SetCustomSongSnapshotDir(const std::string& dir) {
+  if (m_sCustomSongSourceFilename.empty()) {
+    m_sCustomSongSourceFilename = m_sFilename;
   }
+  if (dir.empty()) {
+    m_sFilename = m_sCustomSongSourceFilename;
+    return;
+  }
+  if (m_sCustomSongSourceFilename.empty()) {
+    m_sFilename.clear();
+    return;
+  }
+
+  std::string relative = m_sCustomSongSourceFilename;
+  const std::string& sourceDir = m_pSong->GetSourceSongDir();
+  if (CompareNoCase(Left(relative, sourceDir.size()), sourceDir) == 0) {
+    relative.erase(0, sourceDir.size());
+  } else {
+    relative = Basename(relative);
+  }
+  m_sFilename = dir + relative;
 }
 
 void Steps::Decompress() const { const_cast<Steps*>(this)->Decompress(); }
@@ -708,7 +724,7 @@ bool Steps::HasSignificantTimingChanges() const {
 const std::string Steps::GetMusicPath() const {
   return Song::GetSongAssetPath(
       m_MusicFile.empty() ? m_pSong->m_sMusicFile : m_MusicFile,
-      m_pSong->GetSongDir());
+      m_pSong->GetGameplaySongDir());
 }
 
 const std::string& Steps::GetMusicFile() const { return m_MusicFile; }

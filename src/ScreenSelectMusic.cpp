@@ -93,11 +93,16 @@ static bool g_bSampleMusicWaiting = false;
 static RageTimer g_StartedLoadingAt(RageZeroTimer);
 static RageTimer g_ScreenStartedLoadingAt(RageZeroTimer);
 RageTimer g_CanOpenOptionsList(RageZeroTimer);
+static bool IsVideoFile(const std::string& path);
 
 static LocalizedString PERMANENTLY_DELETE(
     "ScreenSelectMusic", "PermanentlyDelete");
 static LocalizedString PROMPT_BEFORE_EXITING(
     "ScreenSelectMusic", "PromptBeforeExiting");
+static LocalizedString PREPARING_USB_SONG(
+    "ScreenSelectMusic", "PreparingUSBSong");
+static LocalizedString USB_SONG_PREPARE_FAILED(
+    "ScreenSelectMusic", "USBSongPrepareFailed");
 
 REGISTER_SCREEN_CLASS(ScreenSelectMusic);
 void ScreenSelectMusic::Init() {
@@ -145,6 +150,9 @@ void ScreenSelectMusic::Init() {
   CONFIRM_EXIT.Load(m_sName, "ConfirmExit");
 
   m_bPreviewDisabled = !SAMPLE_MUSIC_STARTS_IMMEDIATELY;
+  m_bWaitingForCustomSongSnapshot = false;
+  m_bCustomSongSourceDegraded = false;
+  ZERO(m_bCardReadLease);
 
   m_GameButtonPreviousSong = INPUTMAPPER->GetInputScheme()->ButtonNameToIndex(
       THEME->GetMetric(m_sName, "PreviousSongButton"));
@@ -281,8 +289,19 @@ void ScreenSelectMusic::Init() {
 }
 
 void ScreenSelectMusic::BeginScreen() {
+  // Returning from player options may retain an already-complete snapshot.
+  // Keep it reusable, but expose canonical USB paths while browsing the wheel.
+  GAMESTATE->unpublish_custom_song_snapshot();
+
   g_ScreenStartedLoadingAt.Touch();
   m_timerIdleComment.GetDeltaTime();
+
+  FOREACH_PlayerNumber(pn) {
+    if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(pn) &&
+        !m_bCardReadLease[pn]) {
+      m_bCardReadLease[pn] = MEMCARDMAN->AcquireCardReadLease(pn);
+    }
+  }
 
   if (CommonMetrics::AUTO_SET_STYLE) {
     GAMESTATE->SetCompatibleStylesForPlayers();
@@ -342,6 +361,22 @@ void ScreenSelectMusic::BeginScreen() {
 
 ScreenSelectMusic::~ScreenSelectMusic() {
   LOG->Trace("ScreenSelectMusic::~ScreenSelectMusic()");
+  m_BackgroundLoader.AbortAndWait();
+  m_CustomSongAssetLoader.AbortAndWait();
+  if (MEMCARDMAN->PathIsMemCard(SOUND->GetMusicPath())) {
+    SOUND->StopMusic();
+    SOUND->Flush();
+  }
+  if (m_bWaitingForCustomSongSnapshot ||
+      m_SelectionState != SelectionState_Finalized) {
+    GAMESTATE->release_custom_song_snapshot();
+  }
+  FOREACH_PlayerNumber(pn) {
+    if (m_bCardReadLease[pn]) {
+      MEMCARDMAN->ReleaseCardReadLease(pn);
+      m_bCardReadLease[pn] = false;
+    }
+  }
   IMAGECACHE->Undemand("Banner");
 }
 
@@ -461,7 +496,137 @@ void ScreenSelectMusic::Update(float fDeltaTime) {
 
   ScreenWithMenuElements::Update(fDeltaTime);
 
+  UpdateCustomSongSourceState();
+  UpdateCustomSongSnapshot();
+  UpdateCustomSongAssets();
   CheckBackgroundRequests(false);
+}
+
+void ScreenSelectMusic::UpdateCustomSongSourceState() {
+  Song* song = GAMESTATE->m_pCurSong;
+  bool degraded = false;
+  if (song != nullptr &&
+      song->m_LoadedFromProfile != ProfileSlot_Invalid) {
+    degraded = MEMCARDMAN->IsCardSourceDegraded(
+        PlayerNumber(song->m_LoadedFromProfile));
+  }
+  if (degraded == m_bCustomSongSourceDegraded) {
+    return;
+  }
+
+  m_bCustomSongSourceDegraded = degraded;
+  if (degraded) {
+    g_bCDTitleWaiting = g_bBannerWaiting = g_bSampleMusicWaiting = false;
+    m_BackgroundLoader.Abort();
+    m_CustomSongAssetLoader.Abort();
+    m_CustomSongAssetRequests.clear();
+    SOUND->PlayMusic(m_sLoopMusicPath);
+    MESSAGEMAN->Broadcast("CustomSongSourceDegraded");
+  } else {
+    MESSAGEMAN->Broadcast("CustomSongSourceRestored");
+    if (!m_bWaitingForCustomSongSnapshot) {
+      AfterMusicChange();
+    }
+  }
+}
+
+bool ScreenSelectMusic::CacheCustomSongAsset(const std::string& path) {
+  constexpr size_t MAX_CUSTOM_SONG_ASSET_REQUESTS = 8;
+  if (path.empty() || IsVideoFile(path) ||
+      !MEMCARDMAN->PathIsMemCard(path) ||
+      m_CustomSongAssetRequests.size() >= MAX_CUSTOM_SONG_ASSET_REQUESTS) {
+    return false;
+  }
+  if (std::find(
+          m_CustomSongAssetRequests.begin(),
+          m_CustomSongAssetRequests.end(), path) !=
+      m_CustomSongAssetRequests.end()) {
+    return true;
+  }
+  m_CustomSongAssetRequests.push_back(path);
+  m_CustomSongAssetLoader.CacheFile(path);
+  return true;
+}
+
+void ScreenSelectMusic::UpdateCustomSongAssets() {
+  for (auto it = m_CustomSongAssetRequests.begin();
+       it != m_CustomSongAssetRequests.end();) {
+    std::string cachedPath;
+    if (!m_CustomSongAssetLoader.IsCacheFileFinished(*it, cachedPath)) {
+      ++it;
+      continue;
+    }
+
+    Message ready("CustomSongAssetReady");
+    ready.SetParam("Source", *it);
+    ready.SetParam("Path", cachedPath);
+    ready.SetParam("Success", IsAFile(cachedPath));
+    MESSAGEMAN->Broadcast(ready);
+    m_CustomSongAssetLoader.FinishedWithCachedFile(*it);
+    it = m_CustomSongAssetRequests.erase(it);
+  }
+}
+
+void ScreenSelectMusic::UpdateCustomSongSnapshot() {
+  if (!m_bWaitingForCustomSongSnapshot) {
+    return;
+  }
+
+  const GameState::CustomSongPrepareStatus status =
+      GAMESTATE->get_song_prepare_status();
+  if (status == GameState::PrepareCopying) {
+    return;
+  }
+
+  m_bWaitingForCustomSongSnapshot = false;
+  if (status == GameState::PrepareReady) {
+    Message ready("CustomSongSnapshotReady");
+    ready.SetParam(
+        "Megabytes", GAMESTATE->get_song_snapshot_bytes() / 1000000.0f);
+    MESSAGEMAN->Broadcast(ready);
+    CompleteSongSelection();
+    return;
+  }
+
+  const std::string error = GAMESTATE->get_song_prepare_error();
+  GAMESTATE->release_custom_song_snapshot();
+  SCREENMAN->SystemMessage(
+      USB_SONG_PREPARE_FAILED.GetValue() + ": " + error);
+  Message failed("CustomSongSnapshotFailed");
+  failed.SetParam("Error", error);
+  MESSAGEMAN->Broadcast(failed);
+
+  m_SelectionState = SelectionState_SelectingSong;
+  ZERO(m_bStepsChosen);
+  Message selecting("Start" + SelectionStateToString(m_SelectionState));
+  MESSAGEMAN->Broadcast(selecting);
+  m_MusicWheel.Move(0);
+  AfterMusicChange();
+}
+
+void ScreenSelectMusic::CompleteSongSelection() {
+  /* Optional wheel requests are no longer useful.  The gameplay snapshot is
+   * already complete at this point, so transitioning cannot race the USB. */
+  g_bCDTitleWaiting = g_bBannerWaiting = false;
+  m_BackgroundLoader.Abort();
+  m_CustomSongAssetLoader.Abort();
+  m_CustomSongAssetRequests.clear();
+  CheckBackgroundRequests(true);
+
+  if (OPTIONS_MENU_AVAILABLE) {
+    this->PlayCommand("ShowPressStartForOptions");
+    m_bAllowOptionsMenu = true;
+    if (PREFSMAN->m_AllowHoldForOptions.Get()) {
+      this->PostScreenMessage(SM_AllowOptionsMenuRepeat, 0.5f);
+    }
+
+    StartTransitioningScreen(SM_None);
+    const float time =
+        std::max(SHOW_OPTIONS_MESSAGE_SECONDS, this->GetTweenTimeLeft());
+    this->PostScreenMessage(SM_BeginFadingOut, time);
+  } else {
+    StartTransitioningScreen(SM_BeginFadingOut);
+  }
 }
 
 bool ScreenSelectMusic::Input(const InputEventPlus& input) {
@@ -1190,6 +1355,11 @@ bool ScreenSelectMusic::LoadPlayerProfile(PlayerNumber pn) {
     return false;
   }
 
+  if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(pn) &&
+      !m_bCardReadLease[pn]) {
+    m_bCardReadLease[pn] = MEMCARDMAN->AcquireCardReadLease(pn);
+  }
+
   Message msg(MessageIDToString(Message_PlayerProfileSet));
   msg.SetParam("Player", pn);
   MESSAGEMAN->Broadcast(msg);
@@ -1555,35 +1725,22 @@ bool ScreenSelectMusic::MenuStart(const InputEventPlus& input) {
     // Now that Steps have been chosen, set a Style that can play them.
     GAMESTATE->SetCompatibleStylesForPlayers();
     GAMESTATE->ForceSharedSidesMatch();
-    GAMESTATE->prepare_song_for_gameplay();
-
-    /* If we're currently waiting on song assets, abort all except the music
-     * and start the music, so if we make a choice quickly before background
-     * requests come through, the music will still start. */
-    g_bCDTitleWaiting = g_bBannerWaiting = false;
-    m_BackgroundLoader.Abort();
-    CheckBackgroundRequests(true);
-
-    if (OPTIONS_MENU_AVAILABLE) {
-      // show "hold START for options"
-      this->PlayCommand("ShowPressStartForOptions");
-
-      m_bAllowOptionsMenu = true;
-
-      /* Don't accept a held START for a little while, so it's not
-       * hit accidentally.  Accept an initial START right away, though,
-       * so we don't ignore deliberate fast presses (which would be
-       * annoying). */
-      if (PREFSMAN->m_AllowHoldForOptions.Get()) {
-        this->PostScreenMessage(SM_AllowOptionsMenuRepeat, 0.5f);
-      }
-
-      StartTransitioningScreen(SM_None);
-      float fTime =
-          std::max(SHOW_OPTIONS_MESSAGE_SECONDS, this->GetTweenTimeLeft());
-      this->PostScreenMessage(SM_BeginFadingOut, fTime);
+    const GameState::CustomSongPrepareStatus prepareStatus =
+        GAMESTATE->begin_prepare_song_for_gameplay();
+    if (prepareStatus == GameState::PrepareCopying) {
+      m_bWaitingForCustomSongSnapshot = true;
+      g_bCDTitleWaiting = g_bBannerWaiting = g_bSampleMusicWaiting = false;
+      m_BackgroundLoader.Abort();
+      m_CustomSongAssetLoader.Abort();
+      m_CustomSongAssetRequests.clear();
+      SOUND->StopMusic();
+      SCREENMAN->SystemMessage(PREPARING_USB_SONG.GetValue());
+      MESSAGEMAN->Broadcast("CustomSongSnapshotStarted");
+    } else if (prepareStatus == GameState::PrepareFailed) {
+      m_bWaitingForCustomSongSnapshot = true;
+      UpdateCustomSongSnapshot();
     } else {
-      StartTransitioningScreen(SM_BeginFadingOut);
+      CompleteSongSelection();
     }
   } else  // !finalized.  Set the timer for selecting difficulty and mods.
   {
@@ -1834,6 +1991,13 @@ void ScreenSelectMusic::AfterMusicChange() {
   g_sBannerPath = "";
   g_bWantFallbackCdTitle = false;
   bool bWantBanner = true;
+  bool customSourceDegraded = false;
+  if (pSong != nullptr &&
+      pSong->m_LoadedFromProfile != ProfileSlot_Invalid) {
+    customSourceDegraded = MEMCARDMAN->IsCardSourceDegraded(
+        PlayerNumber(pSong->m_LoadedFromProfile));
+  }
+  m_bCustomSongSourceDegraded = customSourceDegraded;
 
   static SortOrder s_lastSortOrder = SortOrder_Invalid;
   if (GAMESTATE->m_SortOrder != s_lastSortOrder) {
@@ -1978,6 +2142,12 @@ void ScreenSelectMusic::AfterMusicChange() {
       g_sCDTitlePath = pSong->GetCDTitlePath();
       g_bWantFallbackCdTitle = true;
 
+      if (customSourceDegraded) {
+        m_sSampleMusicToPlay.clear();
+        g_sBannerPath.clear();
+        g_sCDTitlePath.clear();
+      }
+
       if (GAMESTATE->m_SortOrder == SORT_METER) {
         for (int i = m_vpSteps.size() - 1; i >= 0; i--) {
           if (m_vpSteps[i]->GetMeter() ==
@@ -2051,11 +2221,25 @@ void ScreenSelectMusic::AfterMusicChange() {
   g_bBannerWaiting = false;
   if (bWantBanner) {
     LOG->Trace("LoadFromCachedBanner(%s)", g_sBannerPath.c_str());
+    const bool customBanner =
+        pSong != nullptr &&
+        pSong->m_LoadedFromProfile != ProfileSlot_Invalid &&
+        !g_sBannerPath.empty();
     // TODO: We should probably have some fallback banner for videos, but for
     // now we can just load the video file directly. This is to try an address
     // some issues with the video banners potentially crashing the game but
     // needs some more investigation.
-    if (IsVideoFile(g_sBannerPath)) {
+    if (customBanner) {
+      // Never decode removable-media graphics on the screen thread.  Display
+      // a deterministic fallback until the worker has copied the bitmap into
+      // the bounded screen-lifetime memory cache.  Video banners stay
+      // disabled for custom songs.
+      m_Banner.LoadFallback();
+      if (!IsVideoFile(g_sBannerPath)) {
+        m_BackgroundLoader.CacheFile(g_sBannerPath);
+        g_bBannerWaiting = true;
+      }
+    } else if (IsVideoFile(g_sBannerPath)) {
       // Directly load the video file.
       m_Banner.LoadFromCachedBanner(g_sBannerPath);
       g_bBannerWaiting = false;
@@ -2168,12 +2352,17 @@ class LunaScreenSelectMusic : public Luna<ScreenSelectMusic> {
     lua_pushboolean(L, p->can_open_options_list(pn));
     return 1;
   }
+  static int CacheCustomSongAsset(T* p, lua_State* L) {
+    lua_pushboolean(L, p->CacheCustomSongAsset(SArg(1)));
+    return 1;
+  }
 
   LunaScreenSelectMusic() {
     ADD_METHOD(GetGoToOptions);
     ADD_METHOD(GetMusicWheel);
     ADD_METHOD(OpenOptionsList);
     ADD_METHOD(CanOpenOptionsList);
+    ADD_METHOD(CacheCustomSongAsset);
   }
 };
 

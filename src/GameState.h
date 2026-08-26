@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@
 
 class Character;
 class Course;
+class CustomSongSnapshot;
 struct Game;
 struct lua_State;
 class LuaTable;
@@ -47,6 +49,7 @@ class GameState {
   /** @brief Whether the player has score data on their profile from playing
    * a song this game. */
   bool m_bPlayerHasCommittedGameplay[NUM_PLAYERS];
+  std::unique_ptr<CustomSongSnapshot> m_CustomSongSnapshot;
 
  public:
   /** @brief Set up the GameState with initial values. */
@@ -270,6 +273,13 @@ class GameState {
   int GetLoadingCourseSongIndex() const;
 
   int prepare_song_for_gameplay();
+  enum CustomSongPrepareStatus { PrepareNotNeeded, PrepareCopying, PrepareReady, PrepareFailed };
+  CustomSongPrepareStatus begin_prepare_song_for_gameplay();
+  CustomSongPrepareStatus get_song_prepare_status();
+  std::string get_song_prepare_error() const;
+  size_t get_song_snapshot_bytes() const;
+  void unpublish_custom_song_snapshot();
+  void release_custom_song_snapshot();
 
   // State Info used during gameplay
 

@@ -34,9 +34,12 @@ class BackgroundLoader {
   /* Abort all loads. */
   void Abort();
 
+  /* Abort all loads and wait until removable-media I/O has stopped. */
+  void AbortAndWait();
+
  private:
   RageThread m_LoadThread;
-  bool m_bShutdownThread;
+  std::atomic<bool> m_bShutdownThread;
   void LoadThread();
   static int LoadThread_Start(void* p) {
     ((BackgroundLoader*)p)->LoadThread();
@@ -59,8 +62,8 @@ class BackgroundLoader {
   /* Filename to number of completed requests */
   std::map<std::string, int> m_FinishedRequests;
 
-  bool m_sThreadIsActive;
-  bool m_sThreadShouldAbort;
+  std::atomic<bool> m_sThreadIsActive;
+  std::atomic<bool> m_sThreadShouldAbort;
 
   RageFileDriverCached* m_pDriver;
 };

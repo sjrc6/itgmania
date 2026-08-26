@@ -330,7 +330,7 @@ bool BackgroundImpl::Layer::CreateBackground(
     if (sToResolve == SONG_BACKGROUND_FILE) {
       vsPaths.push_back(
           pSong->HasBackground()
-              ? pSong->GetBackgroundPath()
+              ? pSong->GetGameplayBackgroundPath()
               : THEME->GetPathG("Common", "fallback background"));
     }
     if (vsPaths.empty()) {

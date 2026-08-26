@@ -33,6 +33,9 @@ Preference<MemoryCardDriverType> g_MemoryCardDriver(
     PreferenceType::Immutable);
 
 bool UsbStorageDevice::operator==(const UsbStorageDevice& other) const {
+  if (sSerial != other.sSerial) {
+    return false;
+  }
   if (iBus != other.iBus) {
     return false;
   }

@@ -176,12 +176,14 @@ bool RageSound::Load(
    * of that.  Since RageSoundReader_Preload is refcounted, this is cheap. */
   RageSoundReader* pSound = SOUNDMAN->GetLoadedSound(sSoundFilePath);
   bool bNeedBuffer = true;
+  bool loadedSuccessfully = true;
   if (pSound == nullptr) {
     std::string error;
-    bool bPrebuffer;
+    bool bPrebuffer = false;
     pSound = RageSoundReader_FileReader::OpenFile(
         sSoundFilePath, error, &bPrebuffer);
     if (pSound == nullptr) {
+      loadedSuccessfully = false;
       LOG->Warn(
           "RageSound::Load: error opening sound \"%s\": %s",
           sSoundFilePath.c_str(), error.c_str());
@@ -233,7 +235,7 @@ bool RageSound::Load(
 
   m_Mutex.SetName(ssprintf("RageSound (%s)", Basename(sSoundFilePath).c_str()));
 
-  return true;
+  return loadedSuccessfully;
 }
 
 void RageSound::LoadSoundReader(RageSoundReader* pSound) {

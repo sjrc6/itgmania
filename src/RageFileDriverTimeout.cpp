@@ -163,6 +163,14 @@ void RageFileDriverTimeout::SetTimeout(float fSeconds) {
   g_apWorkersMutex.Unlock();
 }
 
+void RageFileDriverTimeout::SetRequestTimeout(float fSeconds) {
+  g_apWorkersMutex.Lock();
+  for (unsigned i = 0; i < g_apWorkers.size(); ++i) {
+    g_apWorkers[i]->SetRequestTimeout(fSeconds);
+  }
+  g_apWorkersMutex.Unlock();
+}
+
 ThreadedFileWorker::ThreadedFileWorker(std::string sPath)
     : RageWorkerThread(sPath), m_DeletedFilesLock(sPath + "DeletedFilesLock") {
   /* Grab a reference to the child driver.  We'll operate on it directly. */
