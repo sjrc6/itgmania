@@ -26,6 +26,7 @@
 #include "ImageCache.h"
 #include "LuaManager.h"
 #include "LyricsLoader.h"
+#include "MemoryCardManager.h"
 #include "NoteData.h"
 #include "NoteDataUtil.h"
 #include "NotesLoader.h"
@@ -1560,6 +1561,26 @@ bool Song::ShowInDemonstrationAndRanking() const {
   return !IsTutorial() && NormallyDisplayed();
 }
 
+static bool HasAccessibleSongAsset(
+    const Song* song, const std::string& path) {
+  if (path.empty()) {
+    return false;
+  }
+  if (song->m_LoadedFromProfile == ProfileSlot_Invalid) {
+    return IsAFile(path);
+  }
+  if (!song->GetGameplaySnapshotDir().empty()) {
+    return IsAFile(path);
+  }
+
+  const PlayerNumber player = PlayerNumber(song->m_LoadedFromProfile);
+  if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(player)) {
+    return MEMCARDMAN->IsMounted(player) &&
+           !MEMCARDMAN->IsCardSourceDegraded(player);
+  }
+  return IsAFile(path);
+}
+
 // Hack: see Song::TidyUpData comments.
 bool Song::HasMusic() const {
   // If we have keys, we always have music.
@@ -1567,34 +1588,25 @@ bool Song::HasMusic() const {
     return true;
   }
 
-  return m_sMusicFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetMusicPath()));
+  return m_sMusicFile != "" && HasAccessibleSongAsset(this, GetMusicPath());
 }
 bool Song::HasBanner() const {
-  return m_sBannerFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetBannerPath()));
+  return m_sBannerFile != "" && HasAccessibleSongAsset(this, GetBannerPath());
 }
 bool Song::HasInstrumentTrack(InstrumentTrack it) const {
   return m_sInstrumentTrackFile[it] != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid ||
-          IsAFile(GetInstrumentTrackPath(it)));
+         HasAccessibleSongAsset(this, GetInstrumentTrackPath(it));
 }
 bool Song::HasLyrics() const {
-  return m_sLyricsFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetLyricsPath()));
+  return m_sLyricsFile != "" && HasAccessibleSongAsset(this, GetLyricsPath());
 }
 bool Song::HasBackground() const {
-  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
-    if (m_sGameplaySnapshotDir.empty()) {
-      return m_sBackgroundFile != "";
-    }
-    return m_sBackgroundFile != "" && IsAFile(GetGameplayBackgroundPath());
-  }
-  return m_sBackgroundFile != "" && IsAFile(GetBackgroundPath());
+  return m_sBackgroundFile != "" &&
+         HasAccessibleSongAsset(this, GetGameplayBackgroundPath());
 }
 bool Song::HasCDTitle() const {
   return m_sCDTitleFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetCDTitlePath()));
+         HasAccessibleSongAsset(this, GetCDTitlePath());
 }
 bool Song::HasBGChanges() const {
   FOREACH_BackgroundLayer(i) {
@@ -1606,16 +1618,13 @@ bool Song::HasBGChanges() const {
 }
 bool Song::HasAttacks() const { return !m_Attacks.empty(); }
 bool Song::HasJacket() const {
-  return m_sJacketFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetJacketPath()));
+  return m_sJacketFile != "" && HasAccessibleSongAsset(this, GetJacketPath());
 }
 bool Song::HasDisc() const {
-  return m_sDiscFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetDiscPath()));
+  return m_sDiscFile != "" && HasAccessibleSongAsset(this, GetDiscPath());
 }
 bool Song::HasCDImage() const {
-  return m_sCDFile != "" &&
-         (m_LoadedFromProfile != ProfileSlot_Invalid || IsAFile(GetCDImagePath()));
+  return m_sCDFile != "" && HasAccessibleSongAsset(this, GetCDImagePath());
 }
 bool Song::HasPreviewVid() const {
   if (m_LoadedFromProfile != ProfileSlot_Invalid) {

@@ -289,9 +289,9 @@ void ScreenSelectMusic::Init() {
 }
 
 void ScreenSelectMusic::BeginScreen() {
-  // Returning from player options may retain an already-complete snapshot.
-  // Keep it reusable, but expose canonical USB paths while browsing the wheel.
-  GAMESTATE->unpublish_custom_song_snapshot();
+  // Keep the last selected snapshot through evaluation/name-entry screens so
+  // they can display its banner, then discard it before browsing again.
+  GAMESTATE->release_custom_song_snapshot();
 
   g_ScreenStartedLoadingAt.Touch();
   m_timerIdleComment.GetDeltaTime();
@@ -442,10 +442,20 @@ void ScreenSelectMusic::CheckBackgroundRequests(bool bForce) {
     g_bBannerWaiting = false;
     if (IsAFile(sPath)) {
       m_Banner.Load(sPath, true);
+      if (GAMESTATE->m_pCurSong != nullptr &&
+          GAMESTATE->m_pCurSong->m_LoadedFromProfile !=
+              ProfileSlot_Invalid) {
+        MESSAGEMAN->Broadcast("CustomSongBannerReady");
+      }
     } else {
       LOG->Warn(
           "Keeping fallback after optional banner load failed: %s",
           g_sBannerPath.c_str());
+      if (GAMESTATE->m_pCurSong != nullptr &&
+          GAMESTATE->m_pCurSong->m_LoadedFromProfile !=
+              ProfileSlot_Invalid) {
+        MESSAGEMAN->Broadcast("CustomSongBannerFailed");
+      }
     }
 
     if (bFreeCache) {
@@ -2249,6 +2259,7 @@ void ScreenSelectMusic::AfterMusicChange() {
       // the bounded screen-lifetime memory cache.  Video banners stay
       // disabled for custom songs.
       m_Banner.LoadFallback();
+      MESSAGEMAN->Broadcast("CustomSongBannerLoading");
       if (!IsVideoFile(g_sBannerPath)) {
         m_BackgroundLoader.CacheFile(g_sBannerPath);
         g_bBannerWaiting = true;

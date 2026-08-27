@@ -278,7 +278,6 @@ class GameState {
   CustomSongPrepareStatus get_song_prepare_status();
   std::string get_song_prepare_error() const;
   size_t get_song_snapshot_bytes() const;
-  void unpublish_custom_song_snapshot();
   void release_custom_song_snapshot();
 
   // State Info used during gameplay

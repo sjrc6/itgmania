@@ -1530,12 +1530,6 @@ size_t GameState::get_song_snapshot_bytes() const {
   return m_CustomSongSnapshot ? m_CustomSongSnapshot->GetBytesCopied() : 0;
 }
 
-void GameState::unpublish_custom_song_snapshot() {
-  if (m_CustomSongSnapshot) {
-    m_CustomSongSnapshot->Unpublish();
-  }
-}
-
 void GameState::release_custom_song_snapshot() {
   m_CustomSongSnapshot.reset();
 }

@@ -1117,10 +1117,6 @@ ScreenGameplay::~ScreenGameplay() {
     m_pSoundMusic->StopPlaying();
   }
 
-  // Song actors and audio have released their files.  Drop the private USB
-  // snapshot now instead of retaining every custom song played this session.
-  GAMESTATE->release_custom_song_snapshot();
-
   m_GameplayAssist.StopPlaying();
 }
 
