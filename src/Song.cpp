@@ -451,7 +451,8 @@ bool Song::LoadFromSongDir(
   }
 
   // Load the cached Images, if it's not loaded already.
-  if (PREFSMAN->m_ImageCache == IMGCACHE_LOW_RES_PRELOAD) {
+  if (m_LoadedFromProfile == ProfileSlot_Invalid &&
+      PREFSMAN->m_ImageCache == IMGCACHE_LOW_RES_PRELOAD) {
     for (std::string Image : ImageDir) {
       IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
     }
@@ -728,8 +729,10 @@ void Song::TidyUpData(
     m_bHasBanner = HasBanner();
     m_bHasBackground = HasBackground();
 
-    for (std::string Image : ImageDir) {
-      IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
+    if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+      for (std::string Image : ImageDir) {
+        IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
+      }
     }
 
     // There are several things that need to find a file from the dir with a
@@ -751,11 +754,12 @@ void Song::TidyUpData(
     fill_exts.reserve(4);
     lists_to_fill.push_back(&music_list);
     fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Sound));
-    // Disable bg and banner images and movies for custom songs.  Loading
-    // them takes too long. -Kyz
+    // Catalog bitmap filenames for custom songs too.  This only classifies
+    // metadata; actual USB bitmap reads and decoding happen asynchronously on
+    // ScreenSelectMusic.  Keep custom videos disabled.
+    lists_to_fill.push_back(&image_list);
+    fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Bitmap));
     if (m_LoadedFromProfile == ProfileSlot_Invalid) {
-      lists_to_fill.push_back(&image_list);
-      fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Bitmap));
       lists_to_fill.push_back(&movie_list);
       fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Movie));
     }
@@ -901,9 +905,10 @@ void Song::TidyUpData(
       }
     }
 
-    // Since banner, bg, and cdtitle are disabled for custom songs, don't try
-    // to find them. -Kyz
-    if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+    // Filename hints are cheap and let custom-song graphics use the same
+    // metadata as machine songs.  Dimension-based guessing below remains
+    // disabled for USB songs so catalog loading never decodes USB images.
+    {
       // Here's the problem:  We have a directory full of images. We want to
       // determine which image is the banner, which is the background, and
       // which is the CDTitle.
@@ -977,128 +982,149 @@ void Song::TidyUpData(
             image_list, m_sCDTitleFile, empty_list, contains, empty_list);
       }
 
+      if (m_LoadedFromProfile != ProfileSlot_Invalid && !has_jacket) {
+        // Some packs use an unadorned title filename for their only wheel
+        // graphic.  Select one remaining bitmap as a best-effort jacket; the
+        // background worker will still validate its byte and pixel bounds.
+        for (const std::string& image : image_list) {
+          std::string lower = image;
+          MakeLower(lower);
+          if (blacklistedImages.find(lower) != blacklistedImages.end() ||
+              (m_bHasBanner && EqualsNoCase(image, m_sBannerFile)) ||
+              (m_bHasBackground && EqualsNoCase(image, m_sBackgroundFile)) ||
+              (has_cdtitle && EqualsNoCase(image, m_sCDTitleFile))) {
+            continue;
+          }
+          m_sJacketFile = image;
+          has_jacket = true;
+          break;
+        }
+      }
+
       /* Now, For the images we still haven't found,
        * look at the image dimensions of the remaining unclassified images. */
-      for (unsigned int i = 0; i < image_list.size(); ++i)  // foreach image
-      {
-        if (m_bHasBanner && m_bHasBackground && has_cdtitle) {
-          break;  // done
-        }
-
-        // ignore DWI "-char" graphics
-        std::string lower = image_list[i];
-        MakeLower(lower);
-        if (blacklistedImages.find(lower) != blacklistedImages.end()) {
-          continue;  // skip
-        }
-
-        // Skip any image that we've already classified
-
-        if (m_bHasBanner && EqualsNoCase(m_sBannerFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        if (m_bHasBackground &&
-            EqualsNoCase(m_sBackgroundFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        if (has_cdtitle && EqualsNoCase(m_sCDTitleFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        if (has_jacket && EqualsNoCase(m_sJacketFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        if (has_disc && EqualsNoCase(m_sDiscFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        if (has_cdimage && EqualsNoCase(m_sCDFile, image_list[i])) {
-          continue;  // skip
-        }
-
-        std::string sPath = m_sSongDir + image_list[i];
-
-        // We only care about the dimensions.
-        std::string error;
-        RageSurface* img = RageSurfaceUtils::LoadFile(sPath, error, true);
-        if (!img) {
-          LOG->UserLog(
-              "Graphic file", sPath, "couldn't be loaded: %s", error.c_str());
-          continue;
-        }
-
-        const int width = img->w;
-        const int height = img->h;
-        delete img;
-
-        if (!m_bHasBackground && width >= 320 && height >= 240) {
-          m_sBackgroundFile = image_list[i];
-          m_bHasBackground = true;
-          continue;
-        }
-
-        if (!m_bHasBanner && 100 <= width && width <= 320 && 50 <= height &&
-            height <= 240) {
-          m_sBannerFile = image_list[i];
-          m_bHasBanner = true;
-          continue;
-        }
-
-        /* Some songs have overlarge banners. Check if the ratio is reasonable
-         * (over 2:1; usually over 3:1), and large (not a cdtitle). */
-        if (!m_bHasBanner && width > 200 && float(width) / height > 2.0f) {
-          m_sBannerFile = image_list[i];
-          m_bHasBanner = true;
-          continue;
-        }
-
-        /* Agh. DWI's inline title images are triggering this, resulting in
-         * kanji, etc., being used as a CDTitle for songs with none. Some
-         * sample data from random incarnations:
-         *   42x50 35x50 50x50 144x49
-         * It looks like ~50 height is what people use to align to DWI's font.
-         *
-         * My tallest CDTitle is 44. Let's cut off in the middle and hope for
-         * the best. -(who? -aj) */
-        /* The proper size of a CDTitle is 64x48 or sometihng. Simfile artists
-         * typically don't give a shit about this (see Cetaka's fucking banner
-         * -sized CDTitle). This is also subverted in certain designs (beta
-         * Mungyodance 3 simfiles, for instance, used the CDTitle to hold
-         * various information about the song in question). As it stands,
-         * I'm keeping this code until I figure out wtf to do -aj
-         */
-        if (!has_cdtitle && width <= 100 && height <= 48) {
-          m_sCDTitleFile = image_list[i];
-          has_cdtitle = true;
-          continue;
-        }
-
-        // Jacket files typically have the same width and height.
-        if (!has_jacket && width == height) {
-          m_sJacketFile = image_list[i];
-          has_jacket = true;
-          continue;
-        }
-
-        // Disc images are typically rectangular; make sure we have a banner
-        // already.
-        if (!has_disc && (width > height) && m_bHasBanner) {
-          if (image_list[i] != m_sBannerFile) {
-            m_sDiscFile = image_list[i];
-            has_disc = true;
+      if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+        for (unsigned int i = 0; i < image_list.size(); ++i)  // foreach image
+        {
+          if (m_bHasBanner && m_bHasBackground && has_cdtitle) {
+            break;  // done
           }
-          continue;
-        }
 
-        // CD images are the same as Jackets, typically the same width and
-        // height
-        if (!has_cdimage && width == height) {
-          m_sCDFile = image_list[i];
-          has_cdimage = true;
-          continue;
+          // ignore DWI "-char" graphics
+          std::string lower = image_list[i];
+          MakeLower(lower);
+          if (blacklistedImages.find(lower) != blacklistedImages.end()) {
+            continue;  // skip
+          }
+
+          // Skip any image that we've already classified
+
+          if (m_bHasBanner && EqualsNoCase(m_sBannerFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          if (m_bHasBackground &&
+              EqualsNoCase(m_sBackgroundFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          if (has_cdtitle && EqualsNoCase(m_sCDTitleFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          if (has_jacket && EqualsNoCase(m_sJacketFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          if (has_disc && EqualsNoCase(m_sDiscFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          if (has_cdimage && EqualsNoCase(m_sCDFile, image_list[i])) {
+            continue;  // skip
+          }
+
+          std::string sPath = m_sSongDir + image_list[i];
+
+          // We only care about the dimensions.
+          std::string error;
+          RageSurface* img = RageSurfaceUtils::LoadFile(sPath, error, true);
+          if (!img) {
+            LOG->UserLog(
+                "Graphic file", sPath, "couldn't be loaded: %s", error.c_str());
+            continue;
+          }
+
+          const int width = img->w;
+          const int height = img->h;
+          delete img;
+
+          if (!m_bHasBackground && width >= 320 && height >= 240) {
+            m_sBackgroundFile = image_list[i];
+            m_bHasBackground = true;
+            continue;
+          }
+
+          if (!m_bHasBanner && 100 <= width && width <= 320 && 50 <= height &&
+              height <= 240) {
+            m_sBannerFile = image_list[i];
+            m_bHasBanner = true;
+            continue;
+          }
+
+          /* Some songs have overlarge banners. Check if the ratio is reasonable
+           * (over 2:1; usually over 3:1), and large (not a cdtitle). */
+          if (!m_bHasBanner && width > 200 && float(width) / height > 2.0f) {
+            m_sBannerFile = image_list[i];
+            m_bHasBanner = true;
+            continue;
+          }
+
+          /* Agh. DWI's inline title images are triggering this, resulting in
+           * kanji, etc., being used as a CDTitle for songs with none. Some
+           * sample data from random incarnations:
+           *   42x50 35x50 50x50 144x49
+           * It looks like ~50 height is what people use to align to DWI's font.
+           *
+           * My tallest CDTitle is 44. Let's cut off in the middle and hope for
+           * the best. -(who? -aj) */
+          /* The proper size of a CDTitle is 64x48 or sometihng. Simfile artists
+           * typically don't give a shit about this (see Cetaka's fucking banner
+           * -sized CDTitle). This is also subverted in certain designs (beta
+           * Mungyodance 3 simfiles, for instance, used the CDTitle to hold
+           * various information about the song in question). As it stands,
+           * I'm keeping this code until I figure out wtf to do -aj
+           */
+          if (!has_cdtitle && width <= 100 && height <= 48) {
+            m_sCDTitleFile = image_list[i];
+            has_cdtitle = true;
+            continue;
+          }
+
+          // Jacket files typically have the same width and height.
+          if (!has_jacket && width == height) {
+            m_sJacketFile = image_list[i];
+            has_jacket = true;
+            continue;
+          }
+
+          // Disc images are typically rectangular; make sure we have a banner
+          // already.
+          if (!has_disc && (width > height) && m_bHasBanner) {
+            if (image_list[i] != m_sBannerFile) {
+              m_sDiscFile = image_list[i];
+              has_disc = true;
+            }
+            continue;
+          }
+
+          // CD images are the same as Jackets, typically the same width and
+          // height
+          if (!has_cdimage && width == height) {
+            m_sCDFile = image_list[i];
+            has_cdimage = true;
+            continue;
+          }
         }
       }
       // If no BGChanges are specified and there are movies in the song

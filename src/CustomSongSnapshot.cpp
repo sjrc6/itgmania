@@ -220,14 +220,20 @@ bool CustomSongSnapshot::CollectFiles(std::vector<std::string>& relativeFiles) {
       return !required;
     }
     FixSlashesInPlace(path);
-    CollapsePath(path);
-    if (CompareNoCase(Left(path, m_SourceDir.size()), m_SourceDir) != 0) {
+    std::string relative;
+    if (CompareNoCase(Left(path, m_SourceDir.size()), m_SourceDir) == 0) {
+      relative = path.substr(m_SourceDir.size());
+    } else if (path[0] == '/') {
       if (required) {
         Fail("The song references a required file outside its USB folder.");
       }
       return !required;
+    } else {
+      // Steps filenames are commonly stored relative to the song directory.
+      // Relative does not mean outside; resolve and validate it below.
+      relative = path;
     }
-    const std::string relative = path.substr(m_SourceDir.size());
+    CollapsePath(relative);
     if (!IsSafeRelativePath(relative) ||
         !FILEMAN->IsAFile(m_SourceDir + relative)) {
       if (required) {

@@ -440,7 +440,13 @@ void ScreenSelectMusic::CheckBackgroundRequests(bool bForce) {
     }
 
     g_bBannerWaiting = false;
-    m_Banner.Load(sPath, true);
+    if (IsAFile(sPath)) {
+      m_Banner.Load(sPath, true);
+    } else {
+      LOG->Warn(
+          "Keeping fallback after optional banner load failed: %s",
+          g_sBannerPath.c_str());
+    }
 
     if (bFreeCache) {
       m_BackgroundLoader.FinishedWithCachedFile(g_sBannerPath);
@@ -531,7 +537,7 @@ void ScreenSelectMusic::UpdateCustomSongSourceState() {
 }
 
 bool ScreenSelectMusic::CacheCustomSongAsset(const std::string& path) {
-  constexpr size_t MAX_CUSTOM_SONG_ASSET_REQUESTS = 8;
+  constexpr size_t MAX_CUSTOM_SONG_ASSET_REQUESTS = 32;
   if (path.empty() || IsVideoFile(path) ||
       !MEMCARDMAN->PathIsMemCard(path) ||
       m_CustomSongAssetRequests.size() >= MAX_CUSTOM_SONG_ASSET_REQUESTS) {
@@ -2137,6 +2143,14 @@ void ScreenSelectMusic::AfterMusicChange() {
 
       if (PREFSMAN->m_bShowBanners) {
         g_sBannerPath = pSong->GetBannerPath();
+        if (g_sBannerPath.empty() &&
+            pSong->m_LoadedFromProfile != ProfileSlot_Invalid) {
+          if (pSong->HasJacket()) {
+            g_sBannerPath = pSong->GetJacketPath();
+          } else if (pSong->HasBackground()) {
+            g_sBannerPath = pSong->GetBackgroundPath();
+          }
+        }
       }
 
       g_sCDTitlePath = pSong->GetCDTitlePath();
