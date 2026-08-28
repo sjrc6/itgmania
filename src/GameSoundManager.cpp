@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -106,15 +107,39 @@ struct MusicToPlay {
   float fStartSecond, fLengthSeconds, fFadeInLengthSeconds,
       fFadeOutLengthSeconds;
   bool bAlignBeat, bApplyMusicRate;
-  MusicToPlay() { HasTiming = false; }
+  uint64_t requestId;
+  MusicToPlay() : HasTiming(false), requestId(0) {}
 };
 std::vector<MusicToPlay> g_MusicsToPlay;
 static GameSoundManager::PlayMusicParams g_FallbackMusicParams;
+static uint64_t g_LatestMusicRequestId = 0;
+static uint64_t g_CurrentMusicRequestId = 0;
+
+static MusicToPlay MakeMusicToPlay(
+    const GameSoundManager::PlayMusicParams& params) {
+  MusicToPlay music;
+  music.m_sFile = params.sFile;
+  if (params.pTiming) {
+    music.HasTiming = true;
+    music.m_TimingData = *params.pTiming;
+  } else {
+    music.m_sTimingFile = SetExtension(params.sFile, "sm");
+  }
+  music.bForceLoop = params.bForceLoop;
+  music.fStartSecond = params.fStartSecond;
+  music.fLengthSeconds = params.fLengthSeconds;
+  music.fFadeInLengthSeconds = params.fFadeInLengthSeconds;
+  music.fFadeOutLengthSeconds = params.fFadeOutLengthSeconds;
+  music.bAlignBeat = params.bAlignBeat;
+  music.bApplyMusicRate = params.bApplyMusicRate;
+  return music;
+}
 
 static void StartMusic(MusicToPlay& ToPlay) {
   LockMutex L(*g_Mutex);
   if (g_Playing->m_Music->IsPlaying() &&
       EqualsNoCase(g_Playing->m_Music->GetLoadedFilePath(), ToPlay.m_sFile)) {
+    g_CurrentMusicRequestId = ToPlay.requestId;
     return;
   }
 
@@ -126,6 +151,7 @@ static void StartMusic(MusicToPlay& ToPlay) {
      * sound. Be sure to leave the rest of g_Playing in place. */
     RageSound* pOldSound = g_Playing->m_Music;
     g_Playing->m_Music = new RageSound;
+    g_CurrentMusicRequestId = ToPlay.requestId;
     L.Unlock();
 
     delete pOldSound;
@@ -141,10 +167,27 @@ static void StartMusic(MusicToPlay& ToPlay) {
     RageSound* pSound = new RageSound;
     RageSoundLoadParams params;
     params.m_bSupportRateChanging = ToPlay.bApplyMusicRate;
-    pSound->Load(ToPlay.m_sFile, false, &params);
+    const bool loaded = pSound->Load(ToPlay.m_sFile, false, &params);
     g_Mutex->Lock();
 
     NewMusic = new MusicPlaying(pSound);
+
+    // Loading USB audio can take longer than moving several wheel items.  A
+    // stale request must never replace the newer preview after its slow open
+    // finally completes.
+    if (ToPlay.requestId != g_LatestMusicRequestId) {
+      delete NewMusic;
+      return;
+    }
+    if (!loaded && !g_FallbackMusicParams.sFile.empty()) {
+      MusicToPlay fallback = MakeMusicToPlay(g_FallbackMusicParams);
+      g_FallbackMusicParams.sFile.clear();
+      fallback.requestId = ++g_LatestMusicRequestId;
+      g_MusicsToPlay.push_back(fallback);
+      g_Mutex->Broadcast();
+      delete NewMusic;
+      return;
+    }
   }
 
   NewMusic->m_Timing = g_Playing->m_Timing;
@@ -296,8 +339,13 @@ static void StartMusic(MusicToPlay& ToPlay) {
   }
 
   LockMut(*g_Mutex);
+  if (ToPlay.requestId != g_LatestMusicRequestId) {
+    delete NewMusic;
+    return;
+  }
   delete g_Playing;
   g_Playing = NewMusic;
+  g_CurrentMusicRequestId = ToPlay.requestId;
 }
 
 static void DoPlayOnce(std::string sPath) {
@@ -492,6 +540,7 @@ GameSoundManager::~GameSoundManager() {
 
 void GameSoundManager::Update(float fDeltaTime) {
   {
+    PlayMusicParams fallback;
     g_Mutex->Lock();
     if (g_Playing->m_bApplyMusicRate) {
       RageSoundParams p = g_Playing->m_Music->GetParams();
@@ -503,12 +552,15 @@ void GameSoundManager::Update(float fDeltaTime) {
     }
 
     bool bIsPlaying = g_Playing->m_Music->IsPlaying();
-    g_Mutex->Unlock();
     if (!bIsPlaying && g_bWasPlayingOnLastUpdate &&
+        g_CurrentMusicRequestId == g_LatestMusicRequestId &&
         !g_FallbackMusicParams.sFile.empty()) {
-      PlayMusic(g_FallbackMusicParams);
-
-      g_FallbackMusicParams.sFile = "";
+      fallback = g_FallbackMusicParams;
+      g_FallbackMusicParams.sFile.clear();
+    }
+    g_Mutex->Unlock();
+    if (!fallback.sFile.empty()) {
+      PlayMusic(fallback);
     }
     g_bWasPlayingOnLastUpdate = bIsPlaying;
   }
@@ -699,34 +751,15 @@ void GameSoundManager::PlayMusic(
 
 void GameSoundManager::PlayMusic(
     PlayMusicParams params, PlayMusicParams FallbackMusicParams) {
-  g_FallbackMusicParams = FallbackMusicParams;
-
   //	LOG->Trace("play '%s' (current '%s')", file.c_str(),
   // g_Playing->m_Music->GetLoadedFilePath().c_str());
 
-  MusicToPlay ToPlay;
+  MusicToPlay ToPlay = MakeMusicToPlay(params);
 
-  ToPlay.m_sFile = params.sFile;
-  if (params.pTiming) {
-    ToPlay.HasTiming = true;
-    ToPlay.m_TimingData = *params.pTiming;
-  } else {
-    /* If no timing data was provided, look for it in the same place as the
-     * music file. */
-    // todo: allow loading .ssc files as well -aj
-    ToPlay.m_sTimingFile = SetExtension(params.sFile, "sm");
-  }
-
-  ToPlay.bForceLoop = params.bForceLoop;
-  ToPlay.fStartSecond = params.fStartSecond;
-  ToPlay.fLengthSeconds = params.fLengthSeconds;
-  ToPlay.fFadeInLengthSeconds = params.fFadeInLengthSeconds;
-  ToPlay.fFadeOutLengthSeconds = params.fFadeOutLengthSeconds;
-  ToPlay.bAlignBeat = params.bAlignBeat;
-  ToPlay.bApplyMusicRate = params.bApplyMusicRate;
-
-  /* Add the MusicToPlay to the g_MusicsToPlay queue. */
+  /* Add the MusicToPlay to the queue and assign a latest-request-wins token. */
   g_Mutex->Lock();
+  g_FallbackMusicParams = FallbackMusicParams;
+  ToPlay.requestId = ++g_LatestMusicRequestId;
   g_MusicsToPlay.push_back(ToPlay);
   g_Mutex->Broadcast();
   g_Mutex->Unlock();

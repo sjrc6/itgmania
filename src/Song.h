@@ -2,6 +2,7 @@
 #define SONG_H
 
 #include <array>
+#include <cstddef>
 #include <set>
 #include <string>
 #include <vector>
@@ -66,13 +67,36 @@ struct LyricSegment {
 
 /** @brief Holds all music metadata and steps for one song. */
 class Song {
+  // Custom songs keep their removable-media directory as their canonical
+  // location.  Gameplay may temporarily publish a complete, private snapshot
+  // below /@mem; wheel and catalog consumers must continue to use m_sSongDir.
   std::string m_sSongDir;
-  std::string m_pre_customify_song_dir;
+  std::string m_sGameplaySnapshotDir;
+  std::vector<std::string> m_vsCustomSongGameplayFiles;
+  std::vector<std::string> m_vsCustomSongOptionalGameplayFiles;
+
+  std::string GetCustomSongAssetPath(
+      const std::string& path, const std::string& targetDir) const;
+  std::string GetGameplayAssetPath(const std::string& path) const;
+  bool BuildCustomSongGameplayFiles(size_t maximumBytes);
 
  public:
   void SetSongDir(const std::string sDir) { m_sSongDir = sDir; }
-  std::string GetSongDir() { return m_sSongDir; }
-  std::string GetPreCustomifyDir() { return m_pre_customify_song_dir; }
+  std::string GetSongDir() {
+    return m_sGameplaySnapshotDir.empty() ? m_sSongDir : m_sGameplaySnapshotDir;
+  }
+  const std::string& GetSourceSongDir() const { return m_sSongDir; }
+  const std::string& GetGameplaySnapshotDir() const {
+    return m_sGameplaySnapshotDir;
+  }
+  void SetGameplaySnapshotDir(const std::string& dir);
+  void ClearGameplaySnapshotDir();
+  const std::vector<std::string>& GetCustomSongGameplayFiles() const {
+    return m_vsCustomSongGameplayFiles;
+  }
+  const std::vector<std::string>& GetCustomSongOptionalGameplayFiles() const {
+    return m_vsCustomSongOptionalGameplayFiles;
+  }
 
   /** @brief When should this song be displayed in the music wheel? */
   enum SelectionDisplay {
@@ -160,7 +184,9 @@ class Song {
   void RemoveAutoGenNotes();
 
   // Directory this song data came from:
-  const std::string& GetSongDir() const { return m_sSongDir; }
+  const std::string& GetSongDir() const {
+    return m_sGameplaySnapshotDir.empty() ? m_sSongDir : m_sGameplaySnapshotDir;
+  }
 
   /**
    * @brief Filename associated with this file.
@@ -280,6 +306,7 @@ class Song {
   std::string GetCDTitlePath() const;
   std::string GetPreviewVidPath() const;
   std::string GetPreviewMusicPath() const;
+  std::string GetStepsMusicPath(const std::string& path) const;
   float GetPreviewStartSeconds() const;
 
   std::string GetCacheFile(std::string sPath);

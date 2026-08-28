@@ -89,6 +89,7 @@ static bool g_bWantFallbackCdTitle;
 static bool g_bCDTitleWaiting = false;
 static std::string g_sBannerPath;
 static bool g_bBannerWaiting = false;
+static bool g_bCustomBannerNeedsRequest = false;
 static bool g_bSampleMusicWaiting = false;
 static RageTimer g_StartedLoadingAt(RageZeroTimer);
 static RageTimer g_ScreenStartedLoadingAt(RageZeroTimer);
@@ -145,6 +146,7 @@ void ScreenSelectMusic::Init() {
   CONFIRM_EXIT.Load(m_sName, "ConfirmExit");
 
   m_bPreviewDisabled = !SAMPLE_MUSIC_STARTS_IMMEDIATELY;
+  ZERO(m_bCardReadLease);
 
   m_GameButtonPreviousSong = INPUTMAPPER->GetInputScheme()->ButtonNameToIndex(
       THEME->GetMetric(m_sName, "PreviousSongButton"));
@@ -284,6 +286,16 @@ void ScreenSelectMusic::BeginScreen() {
   g_ScreenStartedLoadingAt.Touch();
   m_timerIdleComment.GetDeltaTime();
 
+  // Acquire the browsing lease before releasing the previous gameplay copy,
+  // so returning from options never briefly unmounts a still-playing preview.
+  FOREACH_PlayerNumber(pn) {
+    if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(pn) &&
+        !m_bCardReadLease[pn]) {
+      m_bCardReadLease[pn] = MEMCARDMAN->AcquireCardReadLease(pn);
+    }
+  }
+  GAMESTATE->release_custom_song_snapshot();
+
   if (CommonMetrics::AUTO_SET_STYLE) {
     GAMESTATE->SetCompatibleStylesForPlayers();
   }
@@ -342,6 +354,22 @@ void ScreenSelectMusic::BeginScreen() {
 
 ScreenSelectMusic::~ScreenSelectMusic() {
   LOG->Trace("ScreenSelectMusic::~ScreenSelectMusic()");
+  m_BackgroundLoader.AbortAndWait();
+  if (m_SelectionState != SelectionState_Finalized &&
+      (MEMCARDMAN->PathIsMemCard(SOUND->GetMusicPath()) ||
+       MEMCARDMAN->PathIsMemCard(m_sSampleMusicToPlay))) {
+    SOUND->StopMusic();
+    SOUND->Flush();
+  }
+  if (m_SelectionState != SelectionState_Finalized) {
+    GAMESTATE->release_custom_song_snapshot();
+  }
+  FOREACH_PlayerNumber(pn) {
+    if (m_bCardReadLease[pn]) {
+      MEMCARDMAN->ReleaseCardReadLease(pn);
+      m_bCardReadLease[pn] = false;
+    }
+  }
   IMAGECACHE->Undemand("Banner");
 }
 
@@ -385,7 +413,7 @@ void ScreenSelectMusic::CheckBackgroundRequests(bool bForce) {
     return;
   }
 
-  if (g_bBannerWaiting) {
+  if (g_bBannerWaiting && !g_bCustomBannerNeedsRequest) {
     if (m_Banner.GetTweenTimeLeft() > 0) {
       return;
     }
@@ -405,7 +433,13 @@ void ScreenSelectMusic::CheckBackgroundRequests(bool bForce) {
     }
 
     g_bBannerWaiting = false;
-    m_Banner.Load(sPath, true);
+    if (IsAFile(sPath)) {
+      m_Banner.Load(sPath, true);
+    } else {
+      LOG->Warn(
+          "Keeping fallback after optional banner load failed: %s",
+          g_sBannerPath.c_str());
+    }
 
     if (bFreeCache) {
       m_BackgroundLoader.FinishedWithCachedFile(g_sBannerPath);
@@ -447,6 +481,16 @@ void ScreenSelectMusic::CheckBackgroundRequests(bool bForce) {
     FallbackMusic.bAlignBeat = ALIGN_MUSIC_BEATS;
 
     SOUND->PlayMusic(PlayParams, FallbackMusic);
+    if (g_bCustomBannerNeedsRequest) {
+      // Give the higher-priority audio worker the first opportunity to enter
+      // the serialized USB driver.  The banner is queued on the next update.
+      return;
+    }
+  }
+
+  if (g_bCustomBannerNeedsRequest) {
+    m_BackgroundLoader.CacheFile(g_sBannerPath);
+    g_bCustomBannerNeedsRequest = false;
   }
 }
 
@@ -1190,6 +1234,10 @@ bool ScreenSelectMusic::LoadPlayerProfile(PlayerNumber pn) {
     return false;
   }
 
+  if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(pn) && !m_bCardReadLease[pn]) {
+    m_bCardReadLease[pn] = MEMCARDMAN->AcquireCardReadLease(pn);
+  }
+
   Message msg(MessageIDToString(Message_PlayerProfileSet));
   msg.SetParam("Player", pn);
   MESSAGEMAN->Broadcast(msg);
@@ -1320,6 +1368,10 @@ bool ScreenSelectMusic::MenuStart(const InputEventPlus& input) {
 
       // a song was selected
       if (m_MusicWheel.GetSelectedSong() != nullptr) {
+        // Start the gameplay copy at the first commitment to this song.  It
+        // can now overlap difficulty selection and the modifier screens.
+        GAMESTATE->begin_prepare_song_for_gameplay();
+
         if (TWO_PART_CONFIRMS_ONLY &&
             SAMPLE_MUSIC_PREVIEW_MODE ==
                 SampleMusicPreviewMode_StartToPreview) {
@@ -1555,12 +1607,12 @@ bool ScreenSelectMusic::MenuStart(const InputEventPlus& input) {
     // Now that Steps have been chosen, set a Style that can play them.
     GAMESTATE->SetCompatibleStylesForPlayers();
     GAMESTATE->ForceSharedSidesMatch();
-    GAMESTATE->prepare_song_for_gameplay();
 
     /* If we're currently waiting on song assets, abort all except the music
      * and start the music, so if we make a choice quickly before background
      * requests come through, the music will still start. */
     g_bCDTitleWaiting = g_bBannerWaiting = false;
+    g_bCustomBannerNeedsRequest = false;
     m_BackgroundLoader.Abort();
     CheckBackgroundRequests(true);
 
@@ -1975,7 +2027,11 @@ void ScreenSelectMusic::AfterMusicChange() {
         g_sBannerPath = pSong->GetBannerPath();
       }
 
-      g_sCDTitlePath = pSong->GetCDTitlePath();
+      // CD titles are deliberately outside the custom-song scope.  Keeping
+      // this empty also avoids a second USB graphic request while scrolling.
+      g_sCDTitlePath = pSong->m_LoadedFromProfile == ProfileSlot_Invalid
+                           ? pSong->GetCDTitlePath()
+                           : std::string();
       g_bWantFallbackCdTitle = true;
 
       if (GAMESTATE->m_SortOrder == SORT_METER) {
@@ -2040,6 +2096,7 @@ void ScreenSelectMusic::AfterMusicChange() {
   // Cancel any previous, incomplete requests for song assets,
   // since we need new ones.
   m_BackgroundLoader.Abort();
+  g_bCustomBannerNeedsRequest = false;
 
   g_bCDTitleWaiting = false;
   if (!g_sCDTitlePath.empty() || g_bWantFallbackCdTitle) {
@@ -2051,11 +2108,24 @@ void ScreenSelectMusic::AfterMusicChange() {
   g_bBannerWaiting = false;
   if (bWantBanner) {
     LOG->Trace("LoadFromCachedBanner(%s)", g_sBannerPath.c_str());
+    const bool customBanner =
+        pSong != nullptr && pSong->m_LoadedFromProfile != ProfileSlot_Invalid &&
+        !g_sBannerPath.empty();
     // TODO: We should probably have some fallback banner for videos, but for
     // now we can just load the video file directly. This is to try an address
     // some issues with the video banners potentially crashing the game but
     // needs some more investigation.
-    if (IsVideoFile(g_sBannerPath)) {
+    if (customBanner) {
+      // Never decode removable-media graphics on the screen thread.  Display
+      // a deterministic fallback until the worker has copied the bitmap into
+      // the bounded screen-lifetime memory cache.  Video banners stay
+      // disabled for custom songs.
+      m_Banner.LoadFallback();
+      if (!IsVideoFile(g_sBannerPath)) {
+        g_bBannerWaiting = true;
+        g_bCustomBannerNeedsRequest = true;
+      }
+    } else if (IsVideoFile(g_sBannerPath)) {
       // Directly load the video file.
       m_Banner.LoadFromCachedBanner(g_sBannerPath);
       g_bBannerWaiting = false;

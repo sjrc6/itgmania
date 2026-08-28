@@ -136,6 +136,7 @@ class Steps {
   void SetChartName(const std::string name) { this->chartName = name; }
   void SetFilename(std::string fn) { m_sFilename = fn; }
   std::string GetFilename() const { return m_sFilename; }
+  void SetDecompressFromDisk(bool enabled) { m_bDecompressFromDisk = enabled; }
   void SetSavedToDisk(bool b) {
     DeAutogen();
     m_bSavedToDisk = b;
@@ -170,8 +171,6 @@ class Steps {
   void CalculateGrooveStatsHash(const NoteData& noteData);
   const std::string GetGrooveStatsHash() const;
   int GetGrooveStatsHashVersion() const;
-
-  void ChangeFilenamesForCustomSong();
 
   void SetLoadedFromProfile(ProfileSlot slot) { m_LoadedFromProfile = slot; }
   void SetMeter(int meter);
@@ -310,6 +309,7 @@ class Steps {
 
   /** @brief The name of the file where these steps are stored. */
   std::string m_sFilename;
+  bool m_bDecompressFromDisk;
   /** @brief true if these Steps were loaded from or saved to disk. */
   bool m_bSavedToDisk;
   /** @brief allows the steps to specify their own music file. */

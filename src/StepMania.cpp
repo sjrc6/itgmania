@@ -274,6 +274,11 @@ void ShutdownGame() {
 
   RageUtil::SafeDelete(NETWORK);
   RageUtil::SafeDelete(SCREENMAN);
+  if (GAMESTATE) {
+    // The custom-song job owns a memory-card lease and a Song pointer.
+    // Release it before either manager is destroyed.
+    GAMESTATE->release_custom_song_snapshot();
+  }
   RageUtil::SafeDelete(STATSMAN);
   RageUtil::SafeDelete(MESSAGEMAN);
   /* Delete INPUTMAN before the other INPUTFILTER handlers, or an input

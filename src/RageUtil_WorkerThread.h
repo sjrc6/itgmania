@@ -18,7 +18,13 @@ class RageWorkerThread {
    * per-request timeout; you have 10 seconds to do your work, at which point
    * all requests time out until SetTimeout is called again. */
   void SetTimeout(float fSeconds);
-  bool TimeoutEnabled() const { return !m_Timeout.IsZero(); }
+  // When enabled, each request receives a fresh budget.  This is suitable for
+  // long-lived removable-media leases, unlike SetTimeout's one absolute
+  // budget for an entire mounted period.
+  void SetRequestTimeout(float fSeconds);
+  bool TimeoutEnabled() const {
+    return !m_Timeout.IsZero() || m_fRequestTimeout >= 0;
+  }
 
   /* Return true if the last operation has timed out and has not yet recovered.
    */
@@ -70,6 +76,7 @@ class RageWorkerThread {
   bool m_bRequestFinished;
   bool m_bTimedOut;
   RageTimer m_Timeout;
+  float m_fRequestTimeout;
 
   float m_fHeartbeat;
   RageTimer m_NextHeartbeat;

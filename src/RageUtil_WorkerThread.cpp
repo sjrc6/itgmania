@@ -12,6 +12,7 @@ RageWorkerThread::RageWorkerThread(const std::string& sName)
       m_HeartbeatEvent("\"" + sName + "\" heartbeat event") {
   m_sName = sName;
   m_Timeout.SetZero();
+  m_fRequestTimeout = -1;
   m_iRequest = REQ_NONE;
   m_bTimedOut = false;
   m_fHeartbeat = -1;
@@ -33,6 +34,12 @@ void RageWorkerThread::SetTimeout(float fSeconds) {
     m_Timeout.Touch();
     m_Timeout += fSeconds;
   }
+  m_WorkerEvent.Unlock();
+}
+
+void RageWorkerThread::SetRequestTimeout(float fSeconds) {
+  m_WorkerEvent.Lock();
+  m_fRequestTimeout = fSeconds;
   m_WorkerEvent.Unlock();
 }
 
@@ -58,6 +65,7 @@ void RageWorkerThread::StopThread() {
   /* Disable the timeout.  This will ensure that we really wait for the worker
    * thread to shut down. */
   SetTimeout(-1);
+  SetRequestTimeout(-1);
 
   /* Shut down. */
   DoRequest(REQ_SHUTDOWN);
@@ -68,7 +76,7 @@ bool RageWorkerThread::DoRequest(int iRequest) {
   ASSERT(!m_bTimedOut);
   ASSERT(m_iRequest == REQ_NONE);
 
-  if (m_Timeout.IsZero() && iRequest != REQ_SHUTDOWN) {
+  if (!TimeoutEnabled() && iRequest != REQ_SHUTDOWN) {
     LOG->Warn(
         "Request made with timeout disabled (%s, iRequest = %i)",
         m_sName.c_str(), iRequest);
@@ -77,12 +85,20 @@ bool RageWorkerThread::DoRequest(int iRequest) {
   /* Set the request, and wake up the worker thread. */
   m_WorkerEvent.Lock();
 
+  RageTimer requestTimeout;
+  RageTimer* timeout = &m_Timeout;
+  if (m_fRequestTimeout >= 0) {
+    requestTimeout.Touch();
+    requestTimeout += m_fRequestTimeout;
+    timeout = &requestTimeout;
+  }
+
   m_iRequest = iRequest;
   m_WorkerEvent.Broadcast();
 
   /* Wait for it to complete or time out. */
   while (!m_bRequestFinished) {
-    bool bTimedOut = !m_WorkerEvent.Wait(&m_Timeout);
+    bool bTimedOut = !m_WorkerEvent.Wait(timeout);
     if (bTimedOut) {
       break;
     }

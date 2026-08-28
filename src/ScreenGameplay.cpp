@@ -394,6 +394,28 @@ ScreenGameplay::ScreenGameplay() {
 }
 
 void ScreenGameplay::Init() {
+  Song* currentSong = GAMESTATE->m_pCurSong;
+  if (currentSong != nullptr &&
+      currentSong->m_LoadedFromProfile != ProfileSlot_Invalid &&
+      PROFILEMAN->ProfileWasLoadedFromMemoryCard(
+          PlayerNumber(currentSong->m_LoadedFromProfile))) {
+    // Cancel any preview request before publishing the memory copy and
+    // releasing its final USB lease.
+    SOUND->StopMusic();
+    SOUND->Flush();
+  }
+
+  // The copy starts when the song is locked in on ScreenSelectMusic, so this
+  // normally completes while the player chooses difficulty and modifiers.
+  // Waiting here is the final boundary that prevents gameplay from touching
+  // removable media.
+  const int customSongCopyResult = GAMESTATE->prepare_song_for_gameplay();
+  if (customSongCopyResult != 0) {
+    LOG->Warn(
+        "Unable to finish the in-memory custom song copy (error %d)",
+        customSongCopyResult);
+  }
+
   SubscribeToMessage("Judgment");
 
   PLAYER_TYPE.Load(m_sName, "PlayerType");

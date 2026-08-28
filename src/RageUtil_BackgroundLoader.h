@@ -3,6 +3,7 @@
 #ifndef RAGE_UTIL_BACKGROUND_LOADER_H
 #define RAGE_UTIL_BACKGROUND_LOADER_H
 
+#include <atomic>
 #include <map>
 #include <string>
 #include <vector>
@@ -34,10 +35,14 @@ class BackgroundLoader {
   /* Abort all loads. */
   void Abort();
 
+  /* Abort all loads and wait until removable-media I/O has stopped. */
+  void AbortAndWait();
+
  private:
   RageThread m_LoadThread;
-  bool m_bShutdownThread;
+  std::atomic<bool> m_bShutdownThread;
   void LoadThread();
+  void MarkThreadIdle();
   static int LoadThread_Start(void* p) {
     ((BackgroundLoader*)p)->LoadThread();
     return 0;
@@ -53,14 +58,15 @@ class BackgroundLoader {
   /* Lock before accessing any of the rest of the object.  Don't keep this
    * locked while doing expensive operations, like reading files. */
   RageMutex m_Mutex;
+  RageEvent m_ThreadIdleEvent;
 
   std::vector<std::string> m_CacheRequests;
 
   /* Filename to number of completed requests */
   std::map<std::string, int> m_FinishedRequests;
 
-  bool m_sThreadIsActive;
-  bool m_sThreadShouldAbort;
+  std::atomic<bool> m_sThreadIsActive;
+  std::atomic<bool> m_sThreadShouldAbort;
 
   RageFileDriverCached* m_pDriver;
 };

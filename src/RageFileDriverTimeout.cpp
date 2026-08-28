@@ -38,8 +38,8 @@
  *
  * Unmounting the filesystem will wait for all timed-out operations to complete.
  *
- * This class is not threadsafe; do not access files on this filesystem from
- * multiple threads simultaneously.
+ * The child driver executes one operation at a time.  Calls from multiple
+ * client threads are serialized around the shared request state.
  */
 
 #include "RageFileDriverTimeout.h"
@@ -108,12 +108,19 @@ class ThreadedFileWorker : public RageWorkerThread {
   void RequestTimedOut();
 
  private:
+  void DeleteWhenWorkerReady(RageFileBasic*& pFile);
+
   /* All requests: */
   RageFileDriver* m_pChildDriver;
 
   /* List of files to delete: */
   std::vector<RageFileBasic*> m_apDeletedFiles;
   RageMutex m_DeletedFilesLock;
+
+  /* Request fields below are shared by every file opened on this driver.
+   * Serialize the complete setup/request/result transaction so preview audio,
+   * graphics, and snapshot reads can safely use the same USB concurrently. */
+  RageMutex m_RequestLock;
 
   /* REQ_OPEN, REQ_POPULATE_FILE_SET, REQ_FLUSH_DIR_CACHE, REQ_REMOVE, REQ_MOVE:
    */
@@ -163,8 +170,18 @@ void RageFileDriverTimeout::SetTimeout(float fSeconds) {
   g_apWorkersMutex.Unlock();
 }
 
+void RageFileDriverTimeout::SetRequestTimeout(float fSeconds) {
+  g_apWorkersMutex.Lock();
+  for (unsigned i = 0; i < g_apWorkers.size(); ++i) {
+    g_apWorkers[i]->SetRequestTimeout(fSeconds);
+  }
+  g_apWorkersMutex.Unlock();
+}
+
 ThreadedFileWorker::ThreadedFileWorker(std::string sPath)
-    : RageWorkerThread(sPath), m_DeletedFilesLock(sPath + "DeletedFilesLock") {
+    : RageWorkerThread(sPath),
+      m_DeletedFilesLock(sPath + "DeletedFilesLock"),
+      m_RequestLock(sPath + "RequestLock") {
   /* Grab a reference to the child driver.  We'll operate on it directly. */
   m_pChildDriver = FILEMAN->GetFileDriver(sPath);
   if (m_pChildDriver == nullptr) {
@@ -237,6 +254,11 @@ void ThreadedFileWorker::HandleRequest(int iRequest) {
       m_iResultRequest = m_pRequestFile->GetFileSize();
       break;
 
+    case REQ_GET_FD:
+      ASSERT(m_pRequestFile != nullptr);
+      m_iResultRequest = m_pRequestFile->GetFD();
+      break;
+
     case REQ_SEEK:
       ASSERT(m_pRequestFile != nullptr);
       m_iResultRequest = m_pRequestFile->Seek(m_iRequestPos);
@@ -306,6 +328,7 @@ void ThreadedFileWorker::RequestTimedOut() {
 
 RageFileBasic* ThreadedFileWorker::Open(
     const std::string& sPath, int iMode, int& iErr) {
+  LockMut(m_RequestLock);
   if (m_pChildDriver == nullptr) {
     iErr = ENODEV;
     return nullptr;
@@ -334,6 +357,7 @@ RageFileBasic* ThreadedFileWorker::Open(
 }
 
 void ThreadedFileWorker::Close(RageFileBasic* pFile) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   if (pFile == nullptr) {
@@ -349,20 +373,27 @@ void ThreadedFileWorker::Close(RageFileBasic* pFile) {
     }
     m_pRequestFile = nullptr;
   } else {
-    /* Delete the file when the timeout completes. */
-    m_DeletedFilesLock.Lock();
-    m_apDeletedFiles.push_back(pFile);
-    m_DeletedFilesLock.Unlock();
+    DeleteWhenWorkerReady(pFile);
   }
 }
 
+void ThreadedFileWorker::DeleteWhenWorkerReady(RageFileBasic*& pFile) {
+  if (pFile == nullptr) {
+    return;
+  }
+  m_DeletedFilesLock.Lock();
+  m_apDeletedFiles.push_back(pFile);
+  m_DeletedFilesLock.Unlock();
+  pFile = nullptr;
+}
+
 int ThreadedFileWorker::GetFileSize(RageFileBasic*& pFile) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -383,12 +414,12 @@ int ThreadedFileWorker::GetFileSize(RageFileBasic*& pFile) {
 }
 
 int ThreadedFileWorker::GetFD(RageFileBasic*& pFile) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -410,12 +441,12 @@ int ThreadedFileWorker::GetFD(RageFileBasic*& pFile) {
 
 int ThreadedFileWorker::Seek(
     RageFileBasic*& pFile, int iPos, std::string& sError) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -443,12 +474,12 @@ int ThreadedFileWorker::Seek(
 
 int ThreadedFileWorker::Read(
     RageFileBasic*& pFile, void* pBuf, int iSize, std::string& sError) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -483,12 +514,12 @@ int ThreadedFileWorker::Read(
 
 int ThreadedFileWorker::Write(
     RageFileBasic*& pFile, const void* pBuf, int iSize, std::string& sError) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -521,12 +552,12 @@ int ThreadedFileWorker::Write(
 }
 
 int ThreadedFileWorker::Flush(RageFileBasic*& pFile, std::string& sError) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -554,12 +585,12 @@ int ThreadedFileWorker::Flush(RageFileBasic*& pFile, std::string& sError) {
 
 RageFileBasic* ThreadedFileWorker::Copy(
     RageFileBasic*& pFile, std::string& sError) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
   if (IsTimedOut()) {
-    this->Close(pFile);
-    pFile = nullptr;
+    DeleteWhenWorkerReady(pFile);
   }
 
   if (pFile == nullptr) {
@@ -584,6 +615,7 @@ RageFileBasic* ThreadedFileWorker::Copy(
 
 bool ThreadedFileWorker::PopulateFileSet(
     FileSet& fs, const std::string& sPath) {
+  LockMut(m_RequestLock);
   if (m_pChildDriver == nullptr) {
     return false;
   }
@@ -608,6 +640,7 @@ bool ThreadedFileWorker::PopulateFileSet(
 
 int ThreadedFileWorker::Move(
     const std::string& sOldPath, const std::string& sNewPath) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
@@ -627,6 +660,7 @@ int ThreadedFileWorker::Move(
 }
 
 int ThreadedFileWorker::Remove(const std::string& sPath) {
+  LockMut(m_RequestLock);
   ASSERT(m_pChildDriver != nullptr); /* how did you get a file to begin with? */
 
   /* If we're currently in a timed-out state, fail. */
@@ -645,6 +679,7 @@ int ThreadedFileWorker::Remove(const std::string& sPath) {
 }
 
 bool ThreadedFileWorker::FlushDirCache(const std::string& sPath) {
+  LockMut(m_RequestLock);
   /* FlushDirCache() is often called globally, on all drivers, which means it's
    * called with no timeout.  Temporarily enable a timeout if needed. */
   bool bTimeoutEnabled = TimeoutEnabled();

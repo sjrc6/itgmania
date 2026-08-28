@@ -34,6 +34,10 @@ class MemoryCardManager {
   bool MountCard(PlayerNumber pn, int iTimeout = 10);
   bool MountCard(PlayerNumber pn, const UsbStorageDevice& d, int iTimeout = 10);
   void UnmountCard(PlayerNumber pn);
+  bool AcquireCardReadLease(PlayerNumber pn, int operationTimeout = 5) {
+    return MountCard(pn, operationTimeout);
+  }
+  void ReleaseCardReadLease(PlayerNumber pn) { UnmountCard(pn); }
 
   void RefreshCardAccessTimeout(float fTimeout = 10.0f);
   bool IsMounted(PlayerNumber pn) const { return m_bMounted[pn]; }
@@ -72,6 +76,7 @@ class MemoryCardManager {
 
   bool m_bCardLocked[NUM_PLAYERS];
   bool m_bMounted[NUM_PLAYERS];  // card is currently mounted
+  int m_iMountRefs[NUM_PLAYERS];
 
   UsbStorageDevice
       m_Device[NUM_PLAYERS];  // device in the memory card slot, blank if none

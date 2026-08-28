@@ -132,6 +132,7 @@ Steps::Steps(Song* song)
       m_bNoteDataIsFilled(false),
       m_sNoteDataCompressed(""),
       m_sFilename(""),
+      m_bDecompressFromDisk(true),
       m_bSavedToDisk(false),
       m_LoadedFromProfile(ProfileSlot_Invalid),
       m_iHash(0),
@@ -474,13 +475,6 @@ void Steps::CalculateMeasureInfo(const NoteData& tempNoteData) {
   }
 }
 
-void Steps::ChangeFilenamesForCustomSong() {
-  m_sFilename = custom_songify_path(m_sFilename);
-  if (!m_MusicFile.empty()) {
-    m_MusicFile = custom_songify_path(m_MusicFile);
-  }
-}
-
 void Steps::Decompress() const { const_cast<Steps*>(this)->Decompress(); }
 
 void Steps::Decompress() {
@@ -548,7 +542,8 @@ void Steps::Compress() const {
     annotationCache.Compress();
   }
 
-  if (!m_sFilename.empty() && m_LoadedFromProfile == ProfileSlot_Invalid) {
+  if (!m_sFilename.empty() && m_bDecompressFromDisk &&
+      m_LoadedFromProfile == ProfileSlot_Invalid) {
     /* We have a file on disk; clear all data in memory.
      * Data on profiles can't be accessed normally (need to mount and time-out
      * the device), and when we start a game and load edits, we want to be
@@ -706,9 +701,7 @@ bool Steps::HasSignificantTimingChanges() const {
 }
 
 const std::string Steps::GetMusicPath() const {
-  return Song::GetSongAssetPath(
-      m_MusicFile.empty() ? m_pSong->m_sMusicFile : m_MusicFile,
-      m_pSong->GetSongDir());
+  return m_pSong->GetStepsMusicPath(m_MusicFile);
 }
 
 const std::string& Steps::GetMusicFile() const { return m_MusicFile; }

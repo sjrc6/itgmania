@@ -20,6 +20,7 @@
 #include "CommonMetrics.h"
 #include "Course.h"
 #include "CryptManager.h"
+#include "CustomSongSnapshot.h"
 #include "Difficulty.h"
 #include "EnumHelper.h"
 #include "Game.h"
@@ -213,6 +214,8 @@ GameState::~GameState() {
   // Unregister with Lua.
   LUA->UnsetGlobal("GAMESTATE");
 
+  release_custom_song_snapshot();
+
   FOREACH_PlayerNumber(p) RageUtil::SafeDelete(m_pPlayerState[p]);
   FOREACH_MultiPlayer(p) RageUtil::SafeDelete(m_pMultiPlayerState[p]);
 
@@ -295,6 +298,7 @@ void GameState::ResetPlayerOptions(PlayerNumber pn) {
 }
 
 void GameState::Reset() {
+  release_custom_song_snapshot();
   this->SetMasterPlayerNumber(
       PLAYER_INVALID);  // must initialize for UnjoinPlayer
 
@@ -1445,46 +1449,70 @@ static const char* prepare_song_failures[] = {
 };
 
 int GameState::prepare_song_for_gameplay() {
-  Song* curr = m_pCurSong;
-  if (curr == nullptr) {
-    return 1;
-  }
-  if (curr->m_LoadedFromProfile == ProfileSlot_Invalid) {
+  const CustomSongPrepareStatus started = begin_prepare_song_for_gameplay();
+  if (started == PrepareNotNeeded) {
     return 0;
   }
-  ProfileSlot prof_slot = curr->m_LoadedFromProfile;
-  PlayerNumber slot_as_pn = PlayerNumber(prof_slot);
-  if (!PROFILEMAN->ProfileWasLoadedFromMemoryCard(slot_as_pn)) {
+  if (started == PrepareReady) {
+    return m_CustomSongSnapshot->Publish() ? 0 : 3;
+  }
+  if (started == PrepareFailed) {
+    if (m_CustomSongSnapshot) {
+      m_CustomSongSnapshot->PreventSourceReads();
+    }
+    return m_pCurSong == nullptr ? 1 : 2;
+  }
+  m_CustomSongSnapshot->Wait();
+  if (m_CustomSongSnapshot->GetStatus() == CustomSongSnapshot::Ready &&
+      m_CustomSongSnapshot->Publish()) {
     return 0;
   }
-  if (!MEMCARDMAN->MountCard(slot_as_pn)) {
-    return 2;
+  m_CustomSongSnapshot->PreventSourceReads();
+  return 3;
+}
+
+GameState::CustomSongPrepareStatus
+GameState::begin_prepare_song_for_gameplay() {
+  Song* song = m_pCurSong;
+  if (song == nullptr) {
+    release_custom_song_snapshot();
+    return PrepareFailed;
   }
-  std::string prof_dir = PROFILEMAN->GetProfileDir(prof_slot);
-  // Song loading changes its paths to point to the cache area. -Kyz
-  std::string to_dir = curr->GetSongDir();
-  std::string from_dir = curr->GetPreCustomifyDir();
-  // The problem of what files to copy is complicated by steps being able to
-  // specify their own music file, and the variety of step file formats.
-  // Complex logic to figure out what files the song actually uses would be
-  // bug prone.  Just copy all audio files and step files. -Kyz
-  std::vector<std::string> copy_exts =
-      ActorUtil::GetTypeExtensionList(FT_Sound);
-  copy_exts.push_back("sm");
-  copy_exts.push_back("ssc");
-  copy_exts.push_back("lrc");
-  std::vector<std::string> files_in_dir;
-  FILEMAN->GetDirListingWithMultipleExtensions(
-      from_dir, copy_exts, files_in_dir);
-  for (size_t i = 0; i < files_in_dir.size(); ++i) {
-    std::string& fname = files_in_dir[i];
-    if (!FileCopy(from_dir + fname, to_dir + fname)) {
-      return 3;
+  if (song->m_LoadedFromProfile == ProfileSlot_Invalid) {
+    release_custom_song_snapshot();
+    return PrepareNotNeeded;
+  }
+
+  const PlayerNumber player = PlayerNumber(song->m_LoadedFromProfile);
+  if (!PROFILEMAN->ProfileWasLoadedFromMemoryCard(player)) {
+    release_custom_song_snapshot();
+    return PrepareNotNeeded;
+  }
+
+  if (m_CustomSongSnapshot && m_CustomSongSnapshot->MatchesSong(song)) {
+    switch (m_CustomSongSnapshot->GetStatus()) {
+      case CustomSongSnapshot::Copying:
+        return PrepareCopying;
+      case CustomSongSnapshot::Ready:
+        return PrepareReady;
+      case CustomSongSnapshot::Failed:
+        return PrepareFailed;
+      case CustomSongSnapshot::Idle:
+        break;
     }
   }
-  MEMCARDMAN->UnmountCard(slot_as_pn);
-  return 0;
+
+  release_custom_song_snapshot();
+  m_CustomSongSnapshot = std::make_unique<CustomSongSnapshot>();
+  const size_t maximumBytes = static_cast<size_t>(
+      PREFSMAN->m_custom_songs_max_megabytes.Get() * 1000000.0f);
+  if (!m_CustomSongSnapshot->Begin(song, player, maximumBytes)) {
+    return PrepareFailed;
+  }
+  return PrepareCopying;
 }
+
+void GameState::release_custom_song_snapshot() { m_CustomSongSnapshot.reset(); }
 
 static LocalizedString PLAYER1("GameState", "Player 1");
 static LocalizedString PLAYER2("GameState", "Player 2");

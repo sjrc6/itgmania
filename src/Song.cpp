@@ -26,6 +26,7 @@
 #include "ImageCache.h"
 #include "LuaManager.h"
 #include "LyricsLoader.h"
+#include "MemoryCardManager.h"
 #include "NoteData.h"
 #include "NoteDataUtil.h"
 #include "NotesLoader.h"
@@ -404,25 +405,18 @@ bool Song::LoadFromSongDir(
       LOG->Trace("Custom song %s is too long.", m_sSongDir.c_str());
       return false;
     }
-    RageFile music;
-    if (!music.Open(GetMusicPath(), RageFile::READ)) {
-      LOG->Trace("Custom song %s could not open music.", m_sSongDir.c_str());
+    const size_t maximumBytes = static_cast<size_t>(
+        PREFSMAN->m_custom_songs_max_megabytes.Get() * 1000000.0f);
+    if (!BuildCustomSongGameplayFiles(maximumBytes)) {
+      LOG->Trace(
+          "Custom song %s has missing gameplay data or exceeds the size "
+          "limit.",
+          m_sSongDir.c_str());
       return false;
     }
-    if (music.GetFileSize() >
-        PREFSMAN->m_custom_songs_max_megabytes * 1000000) {
-      LOG->Trace("Custom song %s music file is too big.", m_sSongDir.c_str());
-      return false;
-    }
-    m_pre_customify_song_dir = m_sSongDir;
-    m_sSongDir = custom_songify_path(m_sSongDir);
-    m_sBannerFile.clear();
-    m_sJacketFile.clear();
-    m_sCDFile.clear();
-    m_sDiscFile.clear();
-    m_sLyricsFile.clear();
-    m_sBackgroundFile.clear();
-    m_sCDTitleFile.clear();
+    // Keep the real removable-media path.  Optional wheel assets are read
+    // from this location while the card has a screen-lifetime read lease.
+    // Gameplay paths are switched only after a complete snapshot is ready.
   }
 
   // Normally TidyUpData would handle setting the m_fBeat0GroupOffsetInSeconds.
@@ -439,7 +433,13 @@ bool Song::LoadFromSongDir(
   for (Steps* s : m_vpSteps) {
     s->m_Timing.m_fBeat0GroupOffsetInSeconds = fOffset;
     if (m_LoadedFromProfile != ProfileSlot_Invalid) {
-      s->ChangeFilenamesForCustomSong();
+      // Profile edits already use this path: retain compressed NoteData in
+      // memory so wheel and modifier consumers never reopen chart files on
+      // removable media.
+      if (s->IsNoteDataEmpty()) {
+        s->Decompress();
+      }
+      s->SetDecompressFromDisk(false);
     }
     /* Compress all Steps. During initial caching, this will remove cached
      * NoteData; during cached loads, this will just remove cached SMData. */
@@ -447,7 +447,8 @@ bool Song::LoadFromSongDir(
   }
 
   // Load the cached Images, if it's not loaded already.
-  if (PREFSMAN->m_ImageCache == IMGCACHE_LOW_RES_PRELOAD) {
+  if (m_LoadedFromProfile == ProfileSlot_Invalid &&
+      PREFSMAN->m_ImageCache == IMGCACHE_LOW_RES_PRELOAD) {
     for (std::string Image : ImageDir) {
       IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
     }
@@ -724,8 +725,10 @@ void Song::TidyUpData(
     m_bHasBanner = HasBanner();
     m_bHasBackground = HasBackground();
 
-    for (std::string Image : ImageDir) {
-      IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
+    if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+      for (std::string Image : ImageDir) {
+        IMAGECACHE->LoadImage(Image, GetCacheFile(Image));
+      }
     }
 
     // There are several things that need to find a file from the dir with a
@@ -747,11 +750,12 @@ void Song::TidyUpData(
     fill_exts.reserve(4);
     lists_to_fill.push_back(&music_list);
     fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Sound));
-    // Disable bg and banner images and movies for custom songs.  Loading
-    // them takes too long. -Kyz
+    // Catalog bitmap filenames for custom songs too.  This only classifies
+    // metadata; actual USB bitmap reads and decoding happen asynchronously on
+    // ScreenSelectMusic.  Keep custom videos disabled.
+    lists_to_fill.push_back(&image_list);
+    fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Bitmap));
     if (m_LoadedFromProfile == ProfileSlot_Invalid) {
-      lists_to_fill.push_back(&image_list);
-      fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Bitmap));
       lists_to_fill.push_back(&movie_list);
       fill_exts.push_back(&ActorUtil::GetTypeExtensionList(FT_Movie));
     }
@@ -897,8 +901,25 @@ void Song::TidyUpData(
       }
     }
 
-    // Since banner, bg, and cdtitle are disabled for custom songs, don't try
-    // to find them. -Kyz
+    if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+      // Only filename hints are used for removable-media graphics.  Avoiding
+      // image decoding here keeps profile loading bounded and leaves decoding
+      // to ScreenSelectMusic's worker.
+      std::vector<std::string> empty_list;
+      if (!m_bHasBanner) {
+        std::vector<std::string> contains(1, "banner");
+        std::vector<std::string> ends_with(1, " bn");
+        m_bHasBanner = FindFirstFilenameContaining(
+            image_list, m_sBannerFile, empty_list, contains, ends_with);
+      }
+      if (!m_bHasBackground) {
+        std::vector<std::string> contains(1, "background");
+        std::vector<std::string> ends_with(1, "bg");
+        m_bHasBackground = FindFirstFilenameContaining(
+            image_list, m_sBackgroundFile, empty_list, contains, ends_with);
+      }
+    }
+
     if (m_LoadedFromProfile == ProfileSlot_Invalid) {
       // Here's the problem:  We have a directory full of images. We want to
       // determine which image is the banner, which is the background, and
@@ -1530,6 +1551,24 @@ bool Song::ShowInDemonstrationAndRanking() const {
   return !IsTutorial() && NormallyDisplayed();
 }
 
+static bool HasAccessibleSongAsset(const Song* song, const std::string& path) {
+  if (path.empty()) {
+    return false;
+  }
+  if (song->m_LoadedFromProfile == ProfileSlot_Invalid) {
+    return IsAFile(path);
+  }
+  if (!song->GetGameplaySnapshotDir().empty()) {
+    return IsAFile(path);
+  }
+
+  const PlayerNumber player = PlayerNumber(song->m_LoadedFromProfile);
+  if (PROFILEMAN->ProfileWasLoadedFromMemoryCard(player)) {
+    return MEMCARDMAN->IsMounted(player);
+  }
+  return IsAFile(path);
+}
+
 // Hack: see Song::TidyUpData comments.
 bool Song::HasMusic() const {
   // If we have keys, we always have music.
@@ -1537,23 +1576,30 @@ bool Song::HasMusic() const {
     return true;
   }
 
-  return m_sMusicFile != "" && IsAFile(GetMusicPath());
+  return m_sMusicFile != "" && HasAccessibleSongAsset(this, GetMusicPath());
 }
 bool Song::HasBanner() const {
-  return m_sBannerFile != "" && IsAFile(GetBannerPath());
+  return m_sBannerFile != "" && HasAccessibleSongAsset(this, GetBannerPath());
 }
 bool Song::HasInstrumentTrack(InstrumentTrack it) const {
   return m_sInstrumentTrackFile[it] != "" &&
-         IsAFile(GetInstrumentTrackPath(it));
+         HasAccessibleSongAsset(this, GetInstrumentTrackPath(it));
 }
 bool Song::HasLyrics() const {
-  return m_sLyricsFile != "" && IsAFile(GetLyricsPath());
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
+  return m_sLyricsFile != "" && HasAccessibleSongAsset(this, GetLyricsPath());
 }
 bool Song::HasBackground() const {
-  return m_sBackgroundFile != "" && IsAFile(GetBackgroundPath());
+  return m_sBackgroundFile != "" &&
+         HasAccessibleSongAsset(this, GetBackgroundPath());
 }
 bool Song::HasCDTitle() const {
-  return m_sCDTitleFile != "" && IsAFile(GetCDTitlePath());
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
+  return m_sCDTitleFile != "" && HasAccessibleSongAsset(this, GetCDTitlePath());
 }
 bool Song::HasBGChanges() const {
   FOREACH_BackgroundLayer(i) {
@@ -1565,15 +1611,27 @@ bool Song::HasBGChanges() const {
 }
 bool Song::HasAttacks() const { return !m_Attacks.empty(); }
 bool Song::HasJacket() const {
-  return m_sJacketFile != "" && IsAFile(GetJacketPath());
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
+  return m_sJacketFile != "" && HasAccessibleSongAsset(this, GetJacketPath());
 }
 bool Song::HasDisc() const {
-  return m_sDiscFile != "" && IsAFile(GetDiscPath());
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
+  return m_sDiscFile != "" && HasAccessibleSongAsset(this, GetDiscPath());
 }
 bool Song::HasCDImage() const {
-  return m_sCDFile != "" && IsAFile(GetCDImagePath());
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
+  return m_sCDFile != "" && HasAccessibleSongAsset(this, GetCDImagePath());
 }
 bool Song::HasPreviewVid() const {
+  if (m_LoadedFromProfile != ProfileSlot_Invalid) {
+    return false;
+  }
   return m_sPreviewVidFile != "" && IsAFile(GetPreviewVidPath());
 }
 
@@ -1727,54 +1785,190 @@ std::string Song::GetSongAssetPath(
   return sPath;
 }
 
+bool Song::BuildCustomSongGameplayFiles(size_t maximumBytes) {
+  m_vsCustomSongGameplayFiles.clear();
+  m_vsCustomSongOptionalGameplayFiles.clear();
+  std::set<std::string> added;
+  std::set<std::string> copied;
+  size_t totalBytes = 0;
+
+  const auto addFile = [this, maximumBytes, &added, &copied, &totalBytes](
+                           const std::string& path, bool required, bool copy) {
+    if (path.empty()) {
+      return !required;
+    }
+
+    const std::string fullPath = GetCustomSongAssetPath(path, m_sSongDir);
+    if (fullPath.empty()) {
+      return !required;
+    }
+    const std::string relative = fullPath.substr(m_sSongDir.size());
+    if (added.find(relative) != added.end()) {
+      if (copy && copied.insert(relative).second) {
+        (required ? m_vsCustomSongGameplayFiles
+                  : m_vsCustomSongOptionalGameplayFiles)
+            .push_back(relative);
+      }
+      return true;
+    }
+
+    const int fileSize = FILEMAN->GetFileSizeInBytes(fullPath);
+    if (fileSize < 0 || totalBytes > maximumBytes ||
+        static_cast<size_t>(fileSize) > maximumBytes - totalBytes) {
+      return !required;
+    }
+
+    added.insert(relative);
+    if (copy && copied.insert(relative).second) {
+      if (required) {
+        m_vsCustomSongGameplayFiles.push_back(relative);
+      } else {
+        m_vsCustomSongOptionalGameplayFiles.push_back(relative);
+      }
+    }
+    totalBytes += static_cast<size_t>(fileSize);
+    return true;
+  };
+
+  // Music and keysounds are required.  NoteData remains compressed in memory;
+  // chart source files count toward the song limit but do not need a second
+  // in-memory filesystem copy.
+  if (!m_sMusicFile.empty() && !addFile(m_sMusicFile, true, true)) {
+    return false;
+  }
+  for (const std::string& keysound : m_vsKeysoundFile) {
+    if (!addFile(keysound, true, true)) {
+      return false;
+    }
+  }
+  FOREACH_ENUM(InstrumentTrack, track) {
+    if (!m_sInstrumentTrackFile[track].empty() &&
+        !addFile(m_sInstrumentTrackFile[track], true, true)) {
+      return false;
+    }
+  }
+  for (const Steps* steps : GetAllSteps()) {
+    if (!steps->GetFilename().empty() &&
+        !addFile(steps->GetFilename(), true, false)) {
+      return false;
+    }
+    if (!steps->GetMusicFile().empty() &&
+        !addFile(steps->GetMusicFile(), true, true)) {
+      return false;
+    }
+  }
+
+  // Preserve the two graphics that are visible in the main flow.  They are
+  // optional and are admitted in UX priority order without ever exceeding the
+  // existing CustomSongsMaxMegabytes limit.
+  if (ActorUtil::GetFileType(
+          GetCustomSongAssetPath(m_sBannerFile, m_sSongDir)) == FT_Bitmap) {
+    addFile(m_sBannerFile, false, true);
+  }
+  if (ActorUtil::GetFileType(
+          GetCustomSongAssetPath(m_sBackgroundFile, m_sSongDir)) == FT_Bitmap) {
+    addFile(m_sBackgroundFile, false, true);
+  }
+  return !m_vsCustomSongGameplayFiles.empty();
+}
+
+std::string Song::GetCustomSongAssetPath(
+    const std::string& path_, const std::string& targetDir) const {
+  std::string path = path_;
+  if (path.empty()) {
+    return std::string();
+  }
+
+  FixSlashesInPlace(path);
+  std::string relative = path;
+  if (CompareNoCase(Left(relative, m_sSongDir.size()), m_sSongDir) == 0) {
+    relative.erase(0, m_sSongDir.size());
+  } else if (relative[0] == '/') {
+    return std::string();
+  }
+  CollapsePath(relative);
+  if (relative.empty() || relative[0] == '/' || Left(relative, 3) == "../") {
+    return std::string();
+  }
+  return targetDir + relative;
+}
+
+std::string Song::GetGameplayAssetPath(const std::string& path) const {
+  if (m_LoadedFromProfile == ProfileSlot_Invalid) {
+    return GetSongAssetPath(path, m_sSongDir);
+  }
+  return GetCustomSongAssetPath(
+      path,
+      m_sGameplaySnapshotDir.empty() ? m_sSongDir : m_sGameplaySnapshotDir);
+}
+
 /* Note that supplying a path relative to the top-level directory is only for
  * compatibility with DWI. We prefer paths relative to the song directory. */
 std::string Song::GetMusicPath() const {
-  return GetSongAssetPath(m_sMusicFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sMusicFile);
 }
 
 std::string Song::GetInstrumentTrackPath(InstrumentTrack it) const {
-  return GetSongAssetPath(m_sInstrumentTrackFile[it], m_sSongDir);
+  return GetGameplayAssetPath(m_sInstrumentTrackFile[it]);
 }
 
 std::string Song::GetBannerPath() const {
-  return GetSongAssetPath(m_sBannerFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sBannerFile);
 }
 
 std::string Song::GetLyricsPath() const {
-  return GetSongAssetPath(m_sLyricsFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sLyricsFile);
 }
 
 std::string Song::GetCDTitlePath() const {
-  return GetSongAssetPath(m_sCDTitleFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sCDTitleFile);
 }
 
 std::string Song::GetBackgroundPath() const {
-  return GetSongAssetPath(m_sBackgroundFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sBackgroundFile);
 }
 
 std::string Song::GetJacketPath() const {
-  return GetSongAssetPath(m_sJacketFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sJacketFile);
 }
 
 std::string Song::GetDiscPath() const {
-  return GetSongAssetPath(m_sDiscFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sDiscFile);
 }
 
 std::string Song::GetCDImagePath() const {
-  return GetSongAssetPath(m_sCDFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sCDFile);
 }
 
 std::string Song::GetPreviewVidPath() const {
-  return GetSongAssetPath(m_sPreviewVidFile, m_sSongDir);
+  return GetGameplayAssetPath(m_sPreviewVidFile);
 }
 
 std::string Song::GetPreviewMusicPath() const {
   if (m_PreviewFile.empty()) {
-    return GetMusicPath();
+    return m_LoadedFromProfile == ProfileSlot_Invalid
+               ? GetSongAssetPath(m_sMusicFile, m_sSongDir)
+               : GetCustomSongAssetPath(m_sMusicFile, m_sSongDir);
   }
-  return GetSongAssetPath(m_PreviewFile, m_sSongDir);
+  return m_LoadedFromProfile == ProfileSlot_Invalid
+             ? GetSongAssetPath(m_PreviewFile, m_sSongDir)
+             : GetCustomSongAssetPath(m_PreviewFile, m_sSongDir);
 }
+
+std::string Song::GetStepsMusicPath(const std::string& path) const {
+  return GetGameplayAssetPath(path.empty() ? m_sMusicFile : path);
+}
+
+void Song::SetGameplaySnapshotDir(const std::string& dir) {
+  ASSERT(m_LoadedFromProfile != ProfileSlot_Invalid);
+  m_sGameplaySnapshotDir = dir;
+  if (!m_sGameplaySnapshotDir.empty() &&
+      Right(m_sGameplaySnapshotDir, 1) != "/") {
+    m_sGameplaySnapshotDir += "/";
+  }
+}
+
+void Song::ClearGameplaySnapshotDir() { m_sGameplaySnapshotDir.clear(); }
 
 float Song::GetPreviewStartSeconds() const {
   if (m_PreviewFile.empty()) {

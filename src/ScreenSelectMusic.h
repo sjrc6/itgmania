@@ -180,6 +180,7 @@ class ScreenSelectMusic : public ScreenWithMenuElements {
   bool m_bAcceptSelectRelease[NUM_PLAYERS];
 
   bool m_bPreviewDisabled;
+  bool m_bCardReadLease[NUM_PLAYERS];
 
   RageSound m_soundStart;
   RageSound m_soundDifficultyEasier;

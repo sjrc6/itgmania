@@ -277,6 +277,7 @@ MemoryCardManager::MemoryCardManager() {
   FOREACH_PlayerNumber(p) {
     m_bCardLocked[p] = false;
     m_bMounted[p] = false;
+    m_iMountRefs[p] = 0;
     m_State[p] = MemoryCardState_NoCard;
   }
 
@@ -584,12 +585,16 @@ bool MemoryCardManager::MountCard(PlayerNumber pn, int iTimeout) {
   }
   ASSERT(!m_Device[pn].IsBlank());
 
+  if (m_iMountRefs[pn] > 0) {
+    ++m_iMountRefs[pn];
+    return true;
+  }
+
   // Pause the mounting thread when we mount the first drive.
   bool bStartingMemoryCardAccess = true;
   FOREACH_PlayerNumber(p) if (m_bMounted[p]) bStartingMemoryCardAccess =
       false;  // already did
   if (bStartingMemoryCardAccess) {
-    // We're starting to do stuff to the memory cards.
     this->PauseMountingThread(iTimeout);
   }
 
@@ -603,6 +608,7 @@ bool MemoryCardManager::MountCard(PlayerNumber pn, int iTimeout) {
   }
 
   m_bMounted[pn] = true;
+  m_iMountRefs[pn] = 1;
 
   RageFileDriver* pDriver =
       FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
@@ -639,11 +645,12 @@ bool MemoryCardManager::MountCard(
 void MemoryCardManager::UnmountCard(PlayerNumber pn) {
   LOG->Trace(
       "MemoryCardManager::UnmountCard(%i) (mounted: %i)", pn, m_bMounted[pn]);
-  if (m_Device[pn].IsBlank()) {
+  if (!m_bMounted[pn] || m_iMountRefs[pn] <= 0) {
     return;
   }
 
-  if (!m_bMounted[pn]) {
+  --m_iMountRefs[pn];
+  if (m_iMountRefs[pn] > 0) {
     return;
   }
 
@@ -701,12 +708,14 @@ void MemoryCardManager::PauseMountingThread(int iTimeout) {
   this->RefreshCardAccessTimeout((float)iTimeout);
 }
 
-// The timeout prevents a bad memory card from indefinitely stalling the game.
-// Possibly each successful file system operation could adjust the
-// timeout by some amount, but that requires a more thoughtful implementation.
+// A read lease can span the whole music-select flow, so give each filesystem
+// request a fresh budget.  One bad operation still times out without making a
+// healthy card expire merely because it has remained mounted for a while.
 void MemoryCardManager::RefreshCardAccessTimeout(float fTimeout) {
-  g_pWorker->SetTimeout(fTimeout);
-  RageFileDriverTimeout::SetTimeout(fTimeout);
+  g_pWorker->SetTimeout(-1);
+  g_pWorker->SetRequestTimeout(fTimeout);
+  RageFileDriverTimeout::SetTimeout(-1);
+  RageFileDriverTimeout::SetRequestTimeout(fTimeout);
 }
 
 void MemoryCardManager::UnPauseMountingThread() {
@@ -716,7 +725,9 @@ void MemoryCardManager::UnPauseMountingThread() {
 
   // End the timeout period.
   g_pWorker->SetTimeout(-1);
+  g_pWorker->SetRequestTimeout(-1);
   RageFileDriverTimeout::SetTimeout(-1);
+  RageFileDriverTimeout::SetRequestTimeout(-1);
 }
 
 // lua start
