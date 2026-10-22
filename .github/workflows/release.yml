@@ -3,6 +3,7 @@ on:
     branches:
       - beta
       - release
+      - 'ci/**'
 
 name: Release
 
@@ -43,7 +44,7 @@ jobs:
           ccache: 'false'
 
       - name: Create nightly release
-        if: github.ref_name == 'beta'
+        if: github.ref_name != 'release'
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release 
           -DWITH_FULL_RELEASE=Off -DWITH_NIGHTLY_RELEASE=On 

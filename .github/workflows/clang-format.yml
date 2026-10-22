@@ -4,6 +4,7 @@ on:
     branches:
       - beta
       - release
+      - 'ci/**'
   pull_request:
     branches:
       - beta
@@ -33,11 +34,9 @@ jobs:
             BASE_SHA="${{ github.event.pull_request.base.sha }}"
             HEAD_SHA="${{ github.sha }}"
           else
-            BASE_SHA="${{ github.event.before }}"
             HEAD_SHA="${{ github.sha }}"
-            if [[ "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
-              BASE_SHA="$(git rev-list --max-parents=0 "$HEAD_SHA" | tail -n 1)"
-            fi
+            git fetch --no-tags https://github.com/itgmania/itgmania.git beta
+            BASE_SHA="$(git merge-base FETCH_HEAD "$HEAD_SHA")"
           fi
 
           files=()
