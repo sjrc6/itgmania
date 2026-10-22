@@ -2,7 +2,7 @@ name: "CodeQL Advanced"
 
 on:
     push:
-        branches: [release, beta]
+        branches: [release, beta, 'ci/**']
         paths:
             - "**.h"
             - "**.hpp"
