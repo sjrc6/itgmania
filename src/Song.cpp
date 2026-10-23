@@ -1,4 +1,5 @@
 #include "Song.h"
+#include "BenchTiming.h"
 
 #include <algorithm>
 #include <cctype>
@@ -354,8 +355,7 @@ bool Song::LoadFromSongDir(
     // There was no entry in the cache for this song, or it was out of date.
     // Let's load it from a file, then write a cache entry.
 
-    if (!NotesLoader::LoadFromDir(
-            sDir, *this, blacklistedImages, load_autosave)) {
+    if (!bench::Timed(bench::NOTES, [&] { return NotesLoader::LoadFromDir(sDir, *this, blacklistedImages, load_autosave); })) {
       LOG->UserLog("Song", sDir, "has no SSC, SM, SMA, or DWI files.");
 
       std::vector<std::string> audios;
@@ -379,9 +379,9 @@ bool Song::LoadFromSongDir(
     }
     // If edits are not cached, looking for them causes a substantial hit to
     // loading time. -Kyz
-    LoadEditsFromSongDir(sDir);
+    { bench::Scope bench_scope(bench::EDITS); LoadEditsFromSongDir(sDir); }
 
-    TidyUpData(false, blacklistedImages);
+    { bench::Scope bench_scope(bench::TIDY); TidyUpData(false, blacklistedImages); }
     // Don't save a cache file if the autosave is being loaded, because the
     // cache file would contain the autosave filename. -Kyz
     // Songs loaded from removable profile are never cached, on the
@@ -400,6 +400,7 @@ bool Song::LoadFromSongDir(
       LOG->Trace("Custom song %s is too long.", m_sSongDir.c_str());
       return false;
     }
+    bench::Scope bench_music_check(bench::MUSIC_CHECK);
     RageFile music;
     if (!music.Open(GetMusicPath(), RageFile::READ)) {
       LOG->Trace("Custom song %s could not open music.", m_sSongDir.c_str());
@@ -439,7 +440,7 @@ bool Song::LoadFromSongDir(
     }
     /* Compress all Steps. During initial caching, this will remove cached
      * NoteData; during cached loads, this will just remove cached SMData. */
-    s->Compress();
+    { bench::Scope bench_scope(bench::COMPRESS); s->Compress(); }
   }
 
   // Load the cached Images, if it's not loaded already.
@@ -798,6 +799,7 @@ void Song::TidyUpData(
     // This must be done before radar calculation.
     if (m_bHasMusic) {
       std::string error;
+      bench::Scope bench_probe(bench::MUSIC_PROBE);
       RageSoundReader* Sample =
           RageSoundReader_FileReader::OpenFile(GetMusicPath(), error);
       /* XXX: Checking if the music file exists eliminates a warning
@@ -839,6 +841,7 @@ void Song::TidyUpData(
             0.00f) {  // if there's a preview file and sample length isn't
                       // specified, set sample length to length of preview file
       std::string error;
+      bench::Scope bench_probe(bench::PREVIEW_PROBE);
       RageSoundReader* Sample =
           RageSoundReader_FileReader::OpenFile(GetPreviewMusicPath(), error);
       if (Sample == nullptr && m_sMusicFile != "") {
@@ -1131,7 +1134,7 @@ void Song::TidyUpData(
    * their source's values. On cache loads the stats and first/last second
    * already came from the cache file -- nothing to recalculate. */
   if (!from_cache) {
-    ReCalculateStepStatsAndLastSecond(true);
+    { bench::Scope bench_scope(bench::STATS); ReCalculateStepStatsAndLastSecond(true); }
   }
   // If the music length is suspiciously shorter than the last second, adjust
   // the length.  This prevents the ogg patch from setting a false length. -Kyz

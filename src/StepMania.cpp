@@ -1,4 +1,13 @@
 #include "StepMania.h"
+#include "BenchTiming.h"
+#include "BenchStress.h"
+#include "MemoryCardManager.h"
+#include "ProfileManager.h"
+#include <chrono>
+#include <thread>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include <cstdlib>
 #include <utility>
@@ -760,6 +769,83 @@ static void ApplyLogPreferences() {
 static LocalizedString COULDNT_OPEN_LOADING_WINDOW(
     "LoadingWindow", "Couldn't open any loading windows.");
 
+// Benchmark-only: with ITGMANIA_BENCH_AUTORUN=<n>, join P1, load its memory
+// card profile n times, then quit. With n = 0, quit right after startup.
+static void RunBenchAutorun() {
+#ifdef __linux__
+  // Let a debugger attach without being our parent (for stuck-process stacks).
+  prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+#endif
+  const char* runs_env = std::getenv("ITGMANIA_BENCH_AUTORUN");
+  if (runs_env == nullptr) {
+    return;
+  }
+  const int runs = std::atoi(runs_env);
+  if (runs <= 0) {
+    // Startup only (e.g. timing the native song load).
+    ArchHooks::SetUserQuit();
+    return;
+  }
+  RageTimer waited;
+  while (MEMCARDMAN->GetCardState(PLAYER_1) != MemoryCardState_Ready &&
+         waited.Ago() < 60.f) {
+    MEMCARDMAN->Update();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  if (MEMCARDMAN->GetCardState(PLAYER_1) != MemoryCardState_Ready) {
+    LOG->Warn("Bench: P1 memory card never became ready.");
+    ArchHooks::SetUserQuit();
+    return;
+  }
+  auto mount = [] {
+    if (bench::MountTimeout() > 0) {
+      MEMCARDMAN->MountCard(PLAYER_1, bench::MountTimeout());
+    } else {
+      MEMCARDMAN->MountCard(PLAYER_1);
+    }
+  };
+  if (const char* stress = std::getenv("ITGMANIA_BENCH_STRESS")) {
+    mount();
+    const std::string summary = bench_stress::Run(std::atof(stress));
+    MEMCARDMAN->UnmountCard(PLAYER_1);
+    LOG->Info("%s", summary.c_str());
+    if (const char* out = std::getenv("ITGMANIA_BENCH_STRESS_OUT")) {
+      if (FILE* f = std::fopen(out, "a")) {
+        std::fputs(summary.c_str(), f);
+        std::fclose(f);
+      }
+    }
+    ArchHooks::SetUserQuit();
+    return;
+  }
+  GAMESTATE->JoinPlayer(PLAYER_1);
+  for (int i = 0; i < runs; ++i) {
+    bench::Snapshot start;
+    start.Take();
+    GAMESTATE->LoadProfiles(true);
+    bench::Snapshot end;
+    end.Take();
+    const bool loaded = PROFILEMAN->IsPersistentProfile(PLAYER_1);
+    bench::EventRow(
+        "load_profiles_total", 0, start, end,
+        loaded ? (long long)PROFILEMAN->GetProfile(PLAYER_1)->m_songs.size()
+               : -1);
+    if (loaded && std::getenv("ITGMANIA_BENCH_SAVE") != nullptr) {
+      bench::Snapshot save_start;
+      save_start.Take();
+      mount();
+      PROFILEMAN->SaveProfile(PLAYER_1);
+      MEMCARDMAN->UnmountCard(PLAYER_1);
+      bench::Snapshot save_end;
+      save_end.Take();
+      bench::EventRow("save_profile", 0, save_start, save_end);
+    }
+    PROFILEMAN->UnloadProfile(PLAYER_1);
+    MEMCARDMAN->UnlockCard(PLAYER_1);
+  }
+  ArchHooks::SetUserQuit();
+}
+
 int sm_main(int argc, char* argv[]) {
   RageThreadRegister thread("Main thread");
   RageException::SetCleanupHandler(HandleException);
@@ -975,6 +1061,8 @@ int sm_main(int argc, char* argv[]) {
   }
 
   CodeDetector::RefreshCacheItems();
+
+  RunBenchAutorun();
 
   // Run the main loop.
   GameLoop::RunGameLoop();

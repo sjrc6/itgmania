@@ -1,4 +1,5 @@
 #include "MemoryCardDriverThreaded_Folder.h"
+#include <cstdlib>
 
 #include <sys/stat.h>
 
@@ -91,11 +92,20 @@ void MemoryCardDriverThreaded_Folder::GetUSBStorageDevices(
 }
 
 bool MemoryCardDriverThreaded_Folder::Mount(UsbStorageDevice* pDevice) {
+  // Benchmark-only: mount the emulated card the way the Linux USB driver does.
+  if (std::getenv("ITGMANIA_FOLDER_CARD_MOUNT") != nullptr) {
+    const std::string dir = pDevice->sOsMountDir;
+    return std::system(
+               ("mountpoint -q '" + dir + "' || mount '" + dir + "'").c_str()) == 0;
+  }
   return true;
 }
 
 void MemoryCardDriverThreaded_Folder::Unmount(UsbStorageDevice* pDevice) {
-  return;
+  if (std::getenv("ITGMANIA_FOLDER_CARD_MOUNT") != nullptr) {
+    const std::string dir = pDevice->sOsMountDir;
+    std::system(("sync; umount -l '" + dir + "'").c_str());
+  }
 }
 
 /*
