@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -56,11 +57,43 @@ static std::string MakeTempFilename(const std::string& sPath) {
   return Dirname(sPath) + "new." + Basename(sPath) + ".new";
 }
 
+#if defined(_WIN32)
+static int OpenWithoutAccessTimeUpdate(const std::string& sPath) {
+  HANDLE hFile = CreateFileA(
+      sPath.c_str(), GENERIC_READ | FILE_WRITE_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (hFile == INVALID_HANDLE_VALUE) {
+    return -1;
+  }
+
+  FILETIME keep = {0xFFFFFFFF, 0xFFFFFFFF};
+  SetFileTime(hFile, nullptr, &keep, nullptr);
+
+  int iFD = _open_osfhandle(
+      reinterpret_cast<std::intptr_t>(hFile), _O_RDONLY | _O_BINARY);
+  if (iFD == -1) {
+    CloseHandle(hFile);
+  }
+  return iFD;
+}
+#endif
+
 static RageFileObjDirect* MakeFileObjDirect(
-    std::string sPath, int iMode, int& iError) {
-  int iFD;
+    std::string sPath, int iMode, bool bUpdateAccessTime, int& iError) {
+  int iFD = -1;
   if (iMode & RageFile::READ) {
-    iFD = DoOpen(sPath.c_str(), O_BINARY | O_RDONLY, 0666);
+#if defined(_WIN32)
+    /* Some USB sticks take seconds to write a new access time. Read-only media
+     * and protected folders deny the access this needs, so fall back on a
+     * plain open. */
+    if (!bUpdateAccessTime) {
+      iFD = OpenWithoutAccessTimeUpdate(sPath);
+    }
+#endif
+    if (iFD == -1) {
+      iFD = DoOpen(sPath.c_str(), O_BINARY | O_RDONLY, 0666);
+    }
 
     /* XXX: Windows returns EACCES if we try to open a file on a CDROM that
      * isn't ready, instead of something like ENODEV.  We want to return that
@@ -92,7 +125,7 @@ static RageFileObjDirect* MakeFileObjDirect(
   }
 #endif
 
-  return new RageFileObjDirect(sPath, iFD, iMode);
+  return new RageFileObjDirect(sPath, iFD, iMode, bUpdateAccessTime);
 }
 
 RageFileBasic* RageFileDriverDirect::Open(
@@ -117,7 +150,7 @@ RageFileBasic* RageFileDriverDirect::Open(
     }
   }
 
-  return MakeFileObjDirect(m_sRoot + sPath, iMode, iError);
+  return MakeFileObjDirect(m_sRoot + sPath, iMode, m_bUpdateAccessTime, iError);
 }
 
 bool RageFileDriverDirect::Move(
@@ -194,7 +227,8 @@ bool RageFileDriverDirect::Remove(const std::string& sPath_) {
 
 RageFileObjDirect* RageFileObjDirect::Copy() const {
   int iErr;
-  RageFileObjDirect* ret = MakeFileObjDirect(m_sPath, m_iMode, iErr);
+  RageFileObjDirect* ret =
+      MakeFileObjDirect(m_sPath, m_iMode, m_bUpdateAccessTime, iErr);
 
   if (ret == nullptr) {
     RageException::Throw(
@@ -241,8 +275,9 @@ bool RageFileDriverDirectReadOnly::Remove(const std::string& /* sPath */) {
 
 static const unsigned int BUFSIZE = 1024 * 64;
 RageFileObjDirect::RageFileObjDirect(
-    const std::string& sPath, int iFD, int iMode) {
+    const std::string& sPath, int iFD, int iMode, bool bUpdateAccessTime) {
   m_sPath = sPath;
+  m_bUpdateAccessTime = bUpdateAccessTime;
   m_iFD = iFD;
   m_bWriteFailed = false;
   m_iMode = iMode;

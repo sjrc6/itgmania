@@ -17,9 +17,11 @@ class RageFileDriverDirect : public RageFileDriver {
   bool Move(const std::string& sOldPath, const std::string& sNewPath);
   bool Remove(const std::string& sPath);
   bool Remount(const std::string& sPath);
+  void DisableAccessTimeUpdates() { m_bUpdateAccessTime = false; }
 
  private:
   std::string m_sRoot;
+  bool m_bUpdateAccessTime = true;
 };
 
 class RageFileDriverDirectReadOnly : public RageFileDriverDirect {
@@ -34,7 +36,8 @@ class RageFileDriverDirectReadOnly : public RageFileDriverDirect {
 
 class RageFileObjDirect : public RageFileObj {
  public:
-  RageFileObjDirect(const std::string& sPath, int iFD, int iMode);
+  RageFileObjDirect(
+      const std::string& sPath, int iFD, int iMode, bool bUpdateAccessTime);
   virtual ~RageFileObjDirect();
   virtual int ReadInternal(void* pBuffer, size_t iBytes);
   virtual int WriteInternal(const void* pBuffer, size_t iBytes);
@@ -50,7 +53,8 @@ class RageFileObjDirect : public RageFileObj {
 
   int m_iFD;
   int m_iMode;
-  std::string m_sPath; /* for Copy */
+  std::string m_sPath;      /* for Copy */
+  bool m_bUpdateAccessTime; /* for Copy */
 
   /*
    * When not streaming to disk, we write to a temporary file, and rename to the

@@ -12,6 +12,7 @@
 #include "PlayerNumber.h"
 #include "Preference.h"
 #include "RageFileDriver.h"
+#include "RageFileDriverDirect.h"
 #include "RageFileDriverTimeout.h"
 #include "RageFileManager.h"
 #include "RageLog.h"
@@ -291,6 +292,16 @@ MemoryCardManager::MemoryCardManager() {
    * nothing reads from it until it's mounted, anyway. */
   FOREACH_PlayerNumber(pn) {
     FILEMAN->Mount("dir", "(empty)", MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
+    RageFileDriver* pDriver =
+        FILEMAN->GetFileDriver(MEM_CARD_MOUNT_POINT_INTERNAL[pn]);
+    RageFileDriverDirect* pDirectDriver =
+        dynamic_cast<RageFileDriverDirect*>(pDriver);
+    if (pDirectDriver != nullptr) {
+      pDirectDriver->DisableAccessTimeUpdates();
+    }
+    if (pDriver != nullptr) {
+      FILEMAN->ReleaseFileDriver(pDriver);
+    }
     FILEMAN->Mount(
         "timeout", MEM_CARD_MOUNT_POINT_INTERNAL[pn], MEM_CARD_MOUNT_POINT[pn]);
   }
