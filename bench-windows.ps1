@@ -1,10 +1,10 @@
 # Benchmark-only: memory card tests on Windows. Not for upstream.
 #
 # Runs, against the profile and songs in <Card>\ITGmania:
-#   1. The data-checking stress test (several threads reading, seeking, copying
-#      and writing files on the card, comparing every result with plain reads).
-#   2. <Reps> profile loads, each followed by a profile save, with per-song,
+#   1. <Reps> profile loads, each followed by a profile save, with per-song,
 #      per-event and (on the PR branch) per-operation timings.
+#   2. The data-checking stress test (several threads reading, seeking, copying
+#      and writing files on the card, comparing every result with plain reads).
 #
 # Usage, from PowerShell in this folder:
 #   .\bench-windows.ps1 -GameDir <folder with Program\ITGmania.exe> -Name branch
@@ -76,12 +76,6 @@ function Run-Game([string] $Label, [hashtable] $Vars) {
   if (Test-Path $log) { Copy-Item $log (Join-Path $out "$Label-log.txt") }
 }
 
-Run-Game "stress" @{
-  ITGMANIA_BENCH_AUTORUN     = "1"
-  ITGMANIA_BENCH_STRESS      = "$StressSeconds"
-  ITGMANIA_BENCH_STRESS_OUT  = (Join-Path $out "stress.txt")
-}
-
 for ($i = 1; $i -le $Reps; $i++) {
   Run-Game "load$i" @{
     ITGMANIA_BENCH_AUTORUN = "1"
@@ -91,6 +85,16 @@ for ($i = 1; $i -le $Reps; $i++) {
     ITGMANIA_BENCH_EVENTS  = (Join-Path $out "events.csv")
     ITGMANIA_BENCH_OPLOG   = (Join-Path $out "ops.csv")
   }
+}
+
+# Last, so it runs after the loads have touched the files. It's one long card
+# access, so lift the access time limit (operations keep their own timeouts).
+Run-Game "stress" @{
+  ITGMANIA_BENCH_AUTORUN        = "1"
+  ITGMANIA_BENCH_STRESS         = "$StressSeconds"
+  ITGMANIA_BENCH_STRESS_OUT     = (Join-Path $out "stress.txt")
+  ITGMANIA_BENCH_MOUNT_TIMEOUT  = "3600"
+  ITGMANIA_BENCH_OPLOG          = (Join-Path $out "stress-ops.csv")
 }
 
 Write-Host ""
