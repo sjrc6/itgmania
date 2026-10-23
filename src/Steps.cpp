@@ -12,6 +12,7 @@
  * Data can be on disk (always compressed), compressed in memory, and
  * uncompressed in memory. */
 #include "Steps.h"
+#include "BenchTiming.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -351,11 +352,26 @@ void Steps::TidyUpData() {
 
 void Steps::CalculateStepStats(float fMusicLengthSeconds) {
   NoteData tempNoteData;
-  this->GetNoteData(tempNoteData);
-  this->CalculateRadarValues(fMusicLengthSeconds, tempNoteData);
-  this->CalculateTechCounts(tempNoteData);
-  this->CalculateMeasureInfo(tempNoteData);
-  this->CalculateGrooveStatsHash(tempNoteData);
+  const bool bench_chart = bench::ChartsEnabled();
+  double bench_t[6] = {0};
+  auto bench_now = [] { return bench::ThreadCpuClock(); };
+  if (bench_chart) bench_t[0] = bench_now();
+  { bench::Scope bench_scope(bench::SD_NOTEDATA); this->GetNoteData(tempNoteData); }
+  if (bench_chart) bench_t[1] = bench_now();
+  { bench::Scope bench_scope(bench::SD_RADAR); this->CalculateRadarValues(fMusicLengthSeconds, tempNoteData); }
+  if (bench_chart) bench_t[2] = bench_now();
+  { bench::Scope bench_scope(bench::SD_TECH); this->CalculateTechCounts(tempNoteData); }
+  if (bench_chart) bench_t[3] = bench_now();
+  { bench::Scope bench_scope(bench::SD_MEASURE); this->CalculateMeasureInfo(tempNoteData); }
+  if (bench_chart) bench_t[4] = bench_now();
+  { bench::Scope bench_scope(bench::SD_HASH); this->CalculateGrooveStatsHash(tempNoteData); }
+  if (bench_chart) bench_t[5] = bench_now();
+  if (bench_chart) {
+    const std::string key = GetFilename() + "|" +
+        m_StepsTypeStr + "|" + std::to_string(int(GetDifficulty())) + "|" + GetDescription();
+    bench::ChartRow(key, m_StepsTypeStr, tempNoteData.GetNumTapNotesNoTiming(), tempNoteData.GetLastBeat(),
+                    bench_t[1] - bench_t[0], bench_t[3] - bench_t[2], bench_t[5] - bench_t[4]);
+  }
 }
 
 void Steps::CalculateRadarValues(

@@ -70,6 +70,11 @@
 #include "RageUtil_FileDB.h"
 #include "global.h"
 
+#include <cstdio>
+#include <cstdlib>
+static thread_local const char* tl_kind = "other";
+static thread_local long tl_bytes = 0;
+
 /* Files are read and written in small pieces, so each operation is quick. */
 constexpr std::chrono::seconds OPERATION_TIMEOUT(5);
 
@@ -97,6 +102,9 @@ class ThreadedFileWorker {
 
  private:
   struct Operation {
+    const char* kind = "other";
+    long bytes = 0;
+    std::chrono::steady_clock::time_point queued;
     std::function<void()> fn;
     bool bFinished = false;
     /* The caller gave up waiting. */
@@ -128,6 +136,7 @@ class ThreadedFileWorker {
   std::chrono::steady_clock::time_point m_Deadline =
       std::chrono::steady_clock::time_point::max();
   bool m_bShutdown = false;
+  FILE* m_pOpLog = nullptr;
 };
 
 ThreadedFileWorker::ThreadedFileWorker(const std::string& sPath)
@@ -140,6 +149,9 @@ ThreadedFileWorker::ThreadedFileWorker(const std::string& sPath)
   }
 
   m_WorkerThread.SetName(sPath);
+  if (const char* p = std::getenv("ITGMANIA_BENCH_OPLOG")) {
+    m_pOpLog = std::fopen(p, "a");
+  }
   m_WorkerThread.Create(StartWorkerMain, this);
 }
 
@@ -156,6 +168,9 @@ ThreadedFileWorker::~ThreadedFileWorker() {
   m_WorkAvailable.notify_one();
 
   m_WorkerThread.Wait();
+  if (m_pOpLog != nullptr) {
+    std::fclose(m_pOpLog);
+  }
 
   if (m_pChildDriver != nullptr) {
     FILEMAN->ReleaseFileDriver(m_pChildDriver);
@@ -175,7 +190,16 @@ void ThreadedFileWorker::WorkerMain() {
     m_Queue.pop_front();
 
     lock.unlock();
+    const auto bench_t0 = std::chrono::steady_clock::now();
     pOp->fn();
+    const auto bench_t1 = std::chrono::steady_clock::now();
+    if (m_pOpLog != nullptr) {
+      using std::chrono::duration_cast;
+      using std::chrono::microseconds;
+      std::fprintf(m_pOpLog, "%s,%ld,%lld,%lld\n", pOp->kind, pOp->bytes,
+          (long long)duration_cast<microseconds>(bench_t1 - bench_t0).count(),
+          (long long)duration_cast<microseconds>(bench_t1 - pOp->queued).count());
+    }
     lock.lock();
 
     pOp->bFinished = true;
@@ -191,6 +215,11 @@ std::shared_ptr<ThreadedFileWorker::Operation> ThreadedFileWorker::Queue(
     std::function<void()> fn) {
   auto pOp = std::make_shared<Operation>();
   pOp->fn = std::move(fn);
+  pOp->kind = tl_kind;
+  pOp->bytes = tl_bytes;
+  pOp->queued = std::chrono::steady_clock::now();
+  tl_kind = "other";
+  tl_bytes = 0;
   m_Queue.push_back(pOp);
   m_WorkAvailable.notify_one();
   return pOp;
@@ -278,11 +307,13 @@ class RageFileObjTimeout : public RageFileObj {
     if (m_pFile != nullptr) {
       auto ppCopy = std::make_shared<RageFileBasic*>(nullptr);
       RageFileBasic* pFile = m_pFile;
+      tl_kind = "copy";
       if (m_pWorker->Run([pFile, ppCopy] { *ppCopy = pFile->Copy(); })) {
         pCopy = *ppCopy;
       } else {
         /* Give up on this file, and on the copy if it's made after all. */
         Close();
+        tl_kind = "close";
         m_pWorker->RunEventually([ppCopy] { delete *ppCopy; });
       }
     }
@@ -294,11 +325,13 @@ class RageFileObjTimeout : public RageFileObj {
 
  protected:
   int SeekInternal(int iPos) {
+    tl_kind = "seek";
     return RunOnFile([iPos](RageFileBasic& file) { return file.Seek(iPos); });
   }
 
   int ReadInternal(void* pBuffer, size_t iBytes) {
     auto pData = std::make_shared<std::vector<char>>(iBytes);
+    tl_kind = "read"; tl_bytes = long(iBytes);
     const int iGot = RunOnFile([pData](RageFileBasic& file) {
       return file.Read(pData->data(), pData->size());
     });
@@ -311,12 +344,14 @@ class RageFileObjTimeout : public RageFileObj {
   int WriteInternal(const void* pBuffer, size_t iBytes) {
     auto pData = std::make_shared<std::string>(
         static_cast<const char*>(pBuffer), iBytes);
+    tl_kind = "write"; tl_bytes = long(iBytes);
     return RunOnFile([pData](RageFileBasic& file) {
       return file.Write(pData->data(), pData->size());
     });
   }
 
   int FlushInternal() {
+    tl_kind = "flush";
     return RunOnFile([](RageFileBasic& file) { return file.Flush(); });
   }
 
@@ -357,6 +392,7 @@ class RageFileObjTimeout : public RageFileObj {
   void Close() const {
     RageFileBasic* pFile = m_pFile;
     m_pFile = nullptr;
+    tl_kind = "close";
     m_pWorker->RunEventually([pFile] { delete pFile; });
   }
 
@@ -388,6 +424,7 @@ class TimedFilenameDB : public FilenameDB {
 
     auto pResult = std::make_shared<FileSet>();
     RageFileDriver* pChildDriver = m_pWorker->GetChildDriver();
+    tl_kind = "list";
     if (!m_pWorker->Run(
             [pChildDriver, pResult, sPath] {
               pChildDriver->FDB->GetFileSetCopy(sPath, *pResult);
@@ -433,6 +470,7 @@ RageFileBasic* RageFileDriverTimeout::Open(
     int iSize = 0;
   };
   auto pResult = std::make_shared<Result>();
+  tl_kind = "open";
   if (!m_pWorker->Run([pChildDriver, pResult, sPath, iMode] {
         pResult->pFile = pChildDriver->Open(sPath, iMode, pResult->iErr);
         /* GetFileSize can't report errors, and asking the device later could
@@ -442,6 +480,7 @@ RageFileBasic* RageFileDriverTimeout::Open(
         }
       })) {
     /* If the file is opened after all, close it. */
+    tl_kind = "close";
     m_pWorker->RunEventually([pResult] { delete pResult->pFile; });
     LOG->Trace("Open(%s) failed", sPath.c_str());
     iErr = EFAULT; /* Win32 has no ETIMEDOUT */
@@ -475,6 +514,7 @@ void RageFileDriverTimeout::FlushDirCache(const std::string& sPath) {
     return;
   }
 
+  tl_kind = "flushdir";
   if (!m_pWorker->Run(
           [pChildDriver, sPath] { pChildDriver->FlushDirCache(sPath); })) {
     LOG->Trace("FlushDirCache(%s) failed", sPath.c_str());
@@ -485,6 +525,7 @@ bool RageFileDriverTimeout::Move(
     const std::string& sOldPath, const std::string& sNewPath) {
   auto pResult = std::make_shared<bool>(false);
   RageFileDriver* pChildDriver = m_pWorker->GetChildDriver();
+  tl_kind = "move";
   if (!m_pWorker->Run([pChildDriver, pResult, sOldPath, sNewPath] {
         *pResult = pChildDriver->Move(sOldPath, sNewPath);
       }) ||
@@ -501,6 +542,7 @@ bool RageFileDriverTimeout::Move(
 bool RageFileDriverTimeout::Remove(const std::string& sPath) {
   auto pResult = std::make_shared<bool>(false);
   RageFileDriver* pChildDriver = m_pWorker->GetChildDriver();
+  tl_kind = "remove";
   if (!m_pWorker->Run([pChildDriver, pResult, sPath] {
         *pResult = pChildDriver->Remove(sPath);
       }) ||

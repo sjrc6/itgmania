@@ -1,4 +1,5 @@
 #include "Profile.h"
+#include "BenchTiming.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -1196,6 +1197,8 @@ void Profile::LoadSongsFromDir(
   LOG->Trace("Found songs folder in profile.");
   RageTimer song_load_start_time;
   song_load_start_time.Touch();
+  bench::Snapshot bench_songs_start;
+  bench_songs_start.Take();
 
   // first level -> can be packs or single songs
   std::vector<std::string> first_level_folders;
@@ -1239,6 +1242,7 @@ void Profile::LoadSongsFromDir(
 
   LOG->Trace("Found %i songs in profile.", int(all_songs_dirs.size()));
 
+  { bench::Snapshot e; e.Take(); bench::EventRow("song_listing", int(prof_slot), bench_songs_start, e); }
   // Only songs that are successfully loaded count towards the limit. -Kyz
   for (std::string& song_dir : all_songs_dirs) {
     if (m_songs.size() >= PREFSMAN->m_custom_songs_max_count) {
@@ -1249,7 +1253,17 @@ void Profile::LoadSongsFromDir(
     }
 
     auto song = std::make_unique<Song>();
-    if (!song->LoadFromSongDir(song_dir, false, prof_slot)) {
+    bench::SongTimes bench_times;
+    bench::Snapshot bench_start;
+    bench_start.Take();
+    bench::Current() = &bench_times;
+    const bool bench_ok = song->LoadFromSongDir(song_dir, false, prof_slot);
+    bench::Current() = nullptr;
+    bench::Snapshot bench_end;
+    bench_end.Take();
+    bench::SongRow(song_dir, bench_ok, int(song->GetAllSteps().size()), song->m_fMusicLengthSeconds,
+                    song->m_sMusicFile, bench_start, bench_end, bench_times);
+    if (!bench_ok) {
       LOG->Trace("Song %s failed to load.", song_dir.c_str());
       continue;
     }
@@ -1261,6 +1275,7 @@ void Profile::LoadSongsFromDir(
     songsGroups[song->m_sGroupName].push_back(song.release());
   }
 
+  { bench::Snapshot e; e.Take(); bench::EventRow("songs_total", int(prof_slot), bench_songs_start, e, (long long)m_songs.size()); }
   float load_time = song_load_start_time.Ago();
   LOG->Trace(
       "Successfully loaded %zu songs in %.6f from profile.", m_songs.size(),

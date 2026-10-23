@@ -1,4 +1,5 @@
 #include "GameState.h"
+#include "BenchTiming.h"
 
 #include <algorithm>
 #include <climits>
@@ -595,10 +596,21 @@ bool GameState::LoadProfileOverGuest(PlayerNumber pn, bool bLoadEdits) {
     return false;
   }
 
-  MEMCARDMAN->MountCard(pn);
-  const bool bSuccess = PROFILEMAN->LoadFirstAvailableProfile(
-      pn, bLoadEdits);  // load full profile
+  bench::Snapshot bench_s0, bench_s1, bench_s2, bench_s3;
+  bench_s0.Take();
+  if (bench::MountTimeout() > 0) {
+    MEMCARDMAN->MountCard(pn, bench::MountTimeout());
+  } else {
+    MEMCARDMAN->MountCard(pn);
+  }
+  bench_s1.Take();
+  const bool bSuccess = PROFILEMAN->LoadFirstAvailableProfile(pn, bLoadEdits);
+  bench_s2.Take();
   MEMCARDMAN->UnmountCard(pn);
+  bench_s3.Take();
+  bench::EventRow("mount", pn, bench_s0, bench_s1);
+  bench::EventRow("load_profile", pn, bench_s1, bench_s2, bSuccess ? 1 : 0);
+  bench::EventRow("unmount", pn, bench_s2, bench_s3);
 
   if (!bSuccess) {
     return false;
